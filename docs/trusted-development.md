@@ -72,15 +72,26 @@ This delegates isolation to the outer trusted development container or OS sandbo
 
 ## Environment forwarding
 
-Read-only Codex keeps the original minimal allowlist. Development additionally forwards proxy variables and `SSH_AUTH_SOCK` so Git and network-dependent development commands can function:
+For explicit interactive Codex tasks, both read-only and development execution forward the configured proxy variables required by the Codex process to reach its model/control-plane services:
 
 ```text
 HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
 http_proxy https_proxy all_proxy no_proxy
+```
+
+These transport variables do not change the read-only task sandbox: read-only turns still use `readOnly` with task network access disabled.
+
+Development execution additionally forwards:
+
+```text
 SSH_AUTH_SOCK
 ```
 
+so Git operations can use an SSH agent when the outer development environment intentionally provides one.
+
 The Bridge still does not forward `OPENAI_API_KEY`, `GH_TOKEN` or `GITHUB_TOKEN` by default. Codex authentication should come from its HOME/CODEX_HOME state; Git/gh authentication is owned by the outer development environment.
+
+Legacy executor calls that do not opt into an explicit interactive execution mode keep the original minimal base environment rather than inheriting transport/development variables implicitly.
 
 ## Supervisor result metadata
 
