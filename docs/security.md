@@ -4,14 +4,17 @@ Engineering Bridge V2 has two materially different security modes and one contro
 
 ## Read-only supervision
 
-`run_readonly_task` preserves the original low-privilege model:
+`run_readonly_task` preserves the original low-privilege task model:
 
 - workspace must be pre-registered;
 - Codex runs with `read-only` thread sandbox;
 - turn policy is `readOnly` with network disabled;
 - DSH remains read-only;
-- proxy and SSH agent environment variables are not inherited by Codex readonly mode;
+- interactive Codex receives only the base environment plus configured proxy transport variables required for Codex model/control-plane connectivity;
+- `SSH_AUTH_SOCK`, `OPENAI_API_KEY`, `GH_TOKEN`, and `GITHUB_TOKEN` are not forwarded by default;
 - the task cannot intentionally modify the workspace, commit, push, or create a PR.
+
+Forwarding proxy variables to the Codex process does not grant network access to the read-only task itself; the turn remains `readOnly` with `networkAccess = false`.
 
 This is a process-level policy, not an OS-level confidentiality boundary: a process running as the same OS user may still read files the OS permits.
 
@@ -22,6 +25,8 @@ Controlled patch remains an explicit review-before-write mechanism.
 `allow_write` means only: the workspace may receive a validated `apply_controlled_patch` after exact `APPLY` confirmation. It does not grant Git development authority, network access, commit/push permission, or development-task eligibility.
 
 Managed workspaces may receive `allow_write` through `authorize_workspace_write` after exact `AUTHORIZE` confirmation.
+
+Controlled-patch proposal execution remains structurally separate from the interactive `run_readonly_task` / `run_development_task` paths and retains its legacy executor environment behavior.
 
 ## Trusted development
 
@@ -102,13 +107,16 @@ trusted dev container
 
 ## Environment forwarding
 
-Readonly Codex receives the minimal base allowlist.
-
-Development additionally receives:
+For interactive Codex tasks, both `run_readonly_task` and `run_development_task` forward the configured proxy transport variables needed by the Codex process itself:
 
 ```text
 HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
 http_proxy https_proxy all_proxy no_proxy
+```
+
+Trusted development additionally receives:
+
+```text
 SSH_AUTH_SOCK
 ```
 
