@@ -157,7 +157,7 @@ test("run_development_task fails closed unless manual local configuration grants
       task_id: "DEV-001"
     });
     assert.equal(invalidBranch.isError, true);
-    assert.equal(JSON.stringify(invalidBranch.body).includes("task_id"), false);
+    assert.equal("task_id" in invalidBranch.body, false);
 
     const invalidTask = await call(client, "run_development_task", {
       workspace_id: "readonly",
@@ -165,7 +165,7 @@ test("run_development_task fails closed unless manual local configuration grants
       task_id: "../DEV-001"
     });
     assert.equal(invalidTask.isError, true);
-    assert.equal(JSON.stringify(invalidTask.body).includes("task_id"), false);
+    assert.equal("task_id" in invalidTask.body, false);
 
     const managedProject = join(configDir, "managed-project");
     mkdirSync(managedProject);
