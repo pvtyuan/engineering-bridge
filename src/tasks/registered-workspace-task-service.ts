@@ -64,7 +64,7 @@ export interface ControlledTaskView {
   readonly taskId: Id;
   readonly state: ControlledTaskState;
   readonly executor: ExecutorName;
-  readonly taskKind: "readonly" | "development";
+  readonly taskKind?: "readonly" | "development";
   readonly workspaceId?: string | undefined;
   readonly workBranch?: string | undefined;
   readonly taskContract?: string | undefined;
@@ -191,15 +191,14 @@ export class RegisteredWorkspaceTaskService {
       const legacy = this.tasks.get(taskId);
       if (!legacy) return undefined;
       if (!("result" in legacy)) {
-        return { taskId, state: legacy.state, executor: legacy.executor, taskKind: "readonly", ready: false };
+        return { taskId, state: legacy.state, executor: legacy.executor, ready: false };
       }
       return legacy.result.state === "completed"
-        ? { taskId, state: "completed", executor: legacy.executor, taskKind: "readonly", ready: true, output: legacy.result.output }
+        ? { taskId, state: "completed", executor: legacy.executor, ready: true, output: legacy.result.output }
         : {
           taskId,
           state: "failed",
           executor: legacy.executor,
-          taskKind: "readonly",
           ready: true,
           error: legacy.result.error,
           ...(legacy.result.partial_output === undefined ? {} : { partial_output: legacy.result.partial_output })
@@ -207,16 +206,16 @@ export class RegisteredWorkspaceTaskService {
     }
     const developmentIdentity = record.request.kind === "development"
       ? {
+        taskKind: "development" as const,
         workspaceId: record.request.workspace_id,
         workBranch: record.request.work_branch,
         taskContract: taskContractPath(record.request.task_id)
       }
-      : { workspaceId: record.request.workspace_id };
+      : {};
     const base: ControlledTaskView = {
       taskId,
       state: record.state,
       executor: record.request.executor,
-      taskKind: record.request.kind,
       ...developmentIdentity,
       evidence: record.evidence,
       ...(record.threadId === undefined ? {} : { threadId: record.threadId })
