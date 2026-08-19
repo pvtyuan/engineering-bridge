@@ -10,6 +10,7 @@ Use for analysis, review, code navigation, and other work that must not mutate t
 
 - executor: Codex or DSH, default Codex;
 - Codex uses read-only sandboxing with network disabled;
+- interactive Codex inherits configured proxy transport variables required for model/control-plane connectivity, without granting task network access;
 - no branch switching, file mutation, commit, push, or PR creation;
 - successful turns enter `waiting_for_supervisor_review` and can be continued, steered, interrupted, or accepted.
 
@@ -83,7 +84,14 @@ approvalPolicy = never
 
 Trusted development therefore delegates isolation to the surrounding development container or OS sandbox. Do not enable it in a broad host environment containing resources Codex should not access.
 
-Development additionally forwards proxy variables and `SSH_AUTH_SOCK`, but the Bridge does not default-forward `OPENAI_API_KEY`, `GH_TOKEN`, or `GITHUB_TOKEN`.
+For interactive Codex execution, both read-only and development tasks inherit configured proxy transport variables:
+
+```text
+HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
+http_proxy https_proxy all_proxy no_proxy
+```
+
+Development additionally inherits `SSH_AUTH_SOCK`. The Bridge does not default-forward `OPENAI_API_KEY`, `GH_TOKEN`, or `GITHUB_TOKEN`.
 
 ## MCP tools
 
