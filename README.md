@@ -115,11 +115,16 @@ approvalPolicy: never
 
 这里的含义是：**Bridge 不再试图用 Codex 自身 sandbox 限制正式开发，而是把外层可信开发容器/OS sandbox 作为安全边界。** 因此只应该在已经隔离并明确允许 Git/网络操作的开发容器中开启 `allow_development`。
 
-Development 模式额外允许 Codex 子进程继承代理变量和 `SSH_AUTH_SOCK`：
+Interactive Codex execution receives configured proxy variables required for Codex model/control-plane connectivity:
 
 ```text
 HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
 http_proxy https_proxy all_proxy no_proxy
+```
+
+Development mode additionally allows Codex to inherit:
+
+```text
 SSH_AUTH_SOCK
 ```
 
