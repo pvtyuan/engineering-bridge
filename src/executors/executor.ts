@@ -2,6 +2,7 @@ import type { Id } from "../core/ids.js";
 import type { SerializedError } from "../core/errors.js";
 
 export type SandboxMode = "read-only" | "workspace-write";
+export type ExecutionMode = "readonly" | "development";
 
 export interface EvidenceChange { readonly path: string; readonly diff: string }
 export interface ExecutorEvidence {
@@ -15,6 +16,9 @@ export interface ExecutorEvidence {
 export interface ExecutorRequest {
   readonly taskId: Id;
   readonly instruction: string;
+  /** Bridge-level execution intent. Development delegates isolation to an external sandbox. */
+  readonly executionMode?: ExecutionMode;
+  /** Legacy executor sandbox seam retained for controlled-patch/read-only compatibility. */
   readonly sandbox?: SandboxMode;
   readonly threadId?: string | undefined;
   readonly onEvidence?: (evidence: readonly ExecutorEvidence[]) => void;

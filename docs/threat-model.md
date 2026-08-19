@@ -1,23 +1,107 @@
-# Threat model
+# Threat Model
 
-This threat model covers the Engineering Bridge V1 (1.2.0). Bridge assumes one trusted local operator controls startup configuration and the local MCP client. It is not designed for untrusted remote callers.
+This document describes the V2 threat model for Engineering Bridge, including trusted development.
 
-| Risk | Current control | Remaining responsibility or limit |
-|---|---|---|
-| Caller chooses an arbitrary workspace | MCP accepts only a registered ID; manual roots come from startup configuration, managed roots are confined to `project_root` approved roots | Operator must protect and review the configuration file |
-| Onboarding escapes the approved root | `bind_project`/`create_project` require exact `BIND`/`CREATE`, canonicalize the candidate with `realpath`, and fail closed unless it equals or is contained by an approved root | Operator chooses `project_root` entries; symlink containment is enforced on the canonical path |
-| Executor modifies files during a task or proposal | `run_task`, supervisor continuations, steering, and proposal generation use fixed read-only settings: Codex approval `never` and read-only sandbox; DSH pinned `DSH_PERMISSION_MODE=read-only` per process | Same-user reads are not contained to the workspace |
-| Caller text becomes a shell command | Codex app-server, DSH, and Git are started without a shell; instructions use the native protocol | Executors still interpret natural-language instructions |
-| Environment secrets leak to the executor | DSH receives only an explicit allowlist (including `DEEPSEEK_API_KEY` and `DSH_TOOLS_MODE`); proxy variables are never forwarded | The allowlist itself is a deliberate surface; keep it minimal and reviewed |
-| Supervisor action bypasses review state | `continue`/`accept` require `waiting_for_supervisor_review`; `steer`/`interrupt` require `running`; interrupt ends failed | The trusted supervisor decides whether output is acceptable and when to continue |
-| Evidence or review output is treated as durable proof | `task_result` labels review output and returns bounded protocol evidence with task state; truncation/eviction by existing bounds is marked (`[truncated]`, changes-omitted counts, `evidence-drop`) | All such state is diagnostic material, not a durable audit record or semantic guarantee; markers only signal incompleteness |
-| A patch escapes through its path | Patch parser rejects absolute, non-normalized and `..` paths; modifications require tracked regular files, while additions require exact 100644 text diffs and a target absent from HEAD, index, and worktree | Human must review all valid in-workspace targets and semantics |
-| Repository changes between review and apply | Exact `APPLY`, recorded base HEAD, canonical root, and clean tracked worktree/index are checked before apply | A failed proposal may be retried only after preconditions are restored; unrelated untracked files are not treated as tracked dirtiness |
-| Symlink or mode-change writes outside the workspace | Symlink/mode patches and non-regular Git entries are rejected | Read-only tasks still lack symlink/read containment |
-| Sensitive executor errors leak | stderr and partial failure output are discarded; fixed errors are returned; `partial_output` exists only for genuine interrupts and ordinary failures never re-expose it | Reduced diagnostic detail; no persistent redaction/logging system exists |
-| Automatic publication occurs | Apply uses only `git apply`; no test, add, commit, or push command exists | User remains responsible for every later Git operation |
-| Restart loses durable state | Controlled-patch proposals/applied history and the managed workspace catalog persist in two atomic 0600 state files; invalid retained records are quarantined, and global invariants fail closed | Active task supervision state (tasks, threads, evidence, review) is process-local and intentionally lost on restart |
-| Retained state is corrupted or tampered with | State files are parsed strictly; individually invalid records are skipped/quarantined, while replay/applied ambiguity and global invariants fail closed | Files are not a credential store or a complete audit log; protect them like local configuration |
-| Long-running task consumes resources | A running task may be explicitly interrupted through `control_task`, which ends it failed | No automatic timeout or resource quota is implemented |
+## Assets
 
-Prompt wording improves proposal quality but is not treated as an enforceable control. Code validation and human review are separate and both necessary. `control_task` acceptance of read-only output is separate from the exact `APPLY` boundary that authorizes a validated controlled patch.
+Relevant assets include:
+
+- source code and uncommitted work in registered workspaces;
+- Git branch state and remote configuration;
+- repository governance such as protected branches and PR review;
+- Codex authentication state;
+- Git/SSH/gh credentials available to the development environment;
+- proxy configuration and network reachability;
+- local MCP/tunnel credentials outside the Bridge when applicable.
+
+## Trust boundaries
+
+### MCP caller -> Bridge
+
+The MCP caller is allowed to choose registered IDs and tool inputs, but it must not be able to create new filesystem trust roots or grant itself development authority.
+
+Controls:
+
+- workspace roots come from local configuration/onboarding boundaries;
+- development remote comes only from local manual configuration;
+- no `authorize_workspace_development` tool exists;
+- branch/task identifiers use conservative validation.
+
+### Bridge -> executor
+
+Readonly tasks are low privilege. Development tasks are deliberately high privilege.
+
+Controls common to Codex execution:
+
+- `shell: false`;
+- user/task instruction travels over app-server stdin rather than argv;
+- fixed Codex app-server invocation;
+- bounded evidence returned to supervisor.
+
+Readonly controls:
+
+- read-only sandbox;
+- network disabled;
+- minimal environment allowlist.
+
+Development controls:
+
+- immutable task identity;
+- deterministic bootstrap contract;
+- outer sandbox explicitly designated as the isolation boundary;
+- proxy/SSH agent forwarding limited to development mode;
+- common API/token variables not forwarded by default.
+
+### Development sandbox -> host/control plane
+
+This is the most important V2 boundary. `externalSandbox` means Codex can exercise permissions granted by the surrounding development container/OS environment.
+
+Do not place control-plane tunnel credentials or unrelated host secrets inside that sandbox unless Codex is intentionally allowed to use them.
+
+## Threats and mitigations
+
+### MCP caller tries to self-escalate
+
+Mitigation: managed workspaces can gain controlled-write only; development permission is manual local configuration and cannot be changed through MCP.
+
+### Caller redirects a task to another remote or branch
+
+Mitigation: remote is not a tool argument. Branch and Task Contract identity are fixed when the task starts and reused for continue/steer.
+
+### Dirty local work is overwritten
+
+Mitigation: bootstrap requires dirty-state inspection before branch change and mandates `BLOCKED` for unrelated changes. It explicitly forbids stash/reset/clean/discard as an automatic repair strategy.
+
+### Local branch divergence is silently destroyed
+
+Mitigation: synchronization is fast-forward only. Rebase/reset/force-update are prohibited by the development contract.
+
+### Prompt injection in repository files changes the target
+
+Residual risk remains because Codex must read repository instructions. Mitigation is to pin the immutable outer identity (workspace/remote/branch/task) and prohibit changes to it even if repository content asks otherwise. Repository governance and outer sandbox controls remain necessary.
+
+### Task path traversal
+
+Mitigation: `task_id` is a conservative token and the Bridge derives `tasks/<task_id>.md`; slash/path traversal values are rejected.
+
+### Git-ref injection
+
+Mitigation: work branches reject whitespace/control characters and dangerous ref constructs. Bridge does not interpolate them into shell commands.
+
+### Secret leakage through inherited environment
+
+Mitigation: development forwards only the base allowlist plus proxy variables and `SSH_AUTH_SOCK`; `OPENAI_API_KEY`, `GH_TOKEN`, and `GITHUB_TOKEN` are not forwarded by default.
+
+Residual risk: secrets readable from HOME, mounted files, SSH agent, credential helpers, Codex state, repository files or other OS-readable paths remain available to the development process.
+
+### Network exfiltration
+
+Readonly tasks have network disabled. Development tasks intentionally have network enabled because dependency access and Git push may require it. The outer sandbox/network policy must therefore restrict destinations when stronger control is needed.
+
+### Force push or merge bypasses governance
+
+Mitigation: bootstrap/development continuation explicitly prohibit force push and PR merge. Protected-branch/ruleset enforcement should remain the hard external control.
+
+## Out of scope guarantees
+
+Engineering Bridge does not claim that trusted development is safe on an unrestricted host. It does not implement kernel-level isolation, network egress filtering, secret scanning, branch protection, GitHub authorization policy, dependency sandboxing or malware detection. Those controls belong to the surrounding development environment and repository platform.

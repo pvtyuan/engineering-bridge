@@ -3,10 +3,18 @@ import { isAbsolute, normalize } from "node:path";
 
 import { CoreError } from "../core/errors.js";
 
+const REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
+
+function isSafeDevelopmentRemote(value: string): boolean {
+  return REMOTE_NAME.test(value) && !value.includes("..");
+}
+
 export interface WorkspaceRegistration {
   readonly id: string;
   readonly root: string;
   readonly allow_write?: boolean | undefined;
+  readonly allow_development?: boolean | undefined;
+  readonly development_remote?: string | undefined;
 }
 
 export interface WorkspaceLookup {
@@ -20,6 +28,8 @@ type Registration = {
   root: string;
   canonicalRoot: string;
   allowWrite: boolean;
+  allowDevelopment: boolean;
+  developmentRemote?: string | undefined;
   source: "manual" | "managed";
 };
 
@@ -34,9 +44,14 @@ export class RegisteredWorkspaceRegistry {
   ) {
     this.canonicalize = canonicalize;
     for (const entry of entries) {
+      const developmentConfigValid = entry.allow_development === true
+        ? typeof entry.development_remote === "string" && isSafeDevelopmentRemote(entry.development_remote)
+        : entry.development_remote === undefined;
       if (typeof entry.id !== "string" || entry.id.length === 0 ||
           typeof entry.root !== "string" || entry.root.length === 0 ||
           (entry.allow_write !== undefined && typeof entry.allow_write !== "boolean") ||
+          (entry.allow_development !== undefined && typeof entry.allow_development !== "boolean") ||
+          !developmentConfigValid ||
           !isAbsolute(entry.root) || normalize(entry.root) !== entry.root ||
           this.registrations.has(entry.id)) {
         throw new CoreError("WORKSPACE_BOUNDARY_VIOLATION");
@@ -46,10 +61,10 @@ export class RegisteredWorkspaceRegistry {
         root: entry.root,
         canonicalRoot,
         allowWrite: entry.allow_write ?? false,
+        allowDevelopment: entry.allow_development ?? false,
+        ...(entry.development_remote === undefined ? {} : { developmentRemote: entry.development_remote }),
         source: "manual"
       });
-      // Duplicate canonical roots among manual entries do not fail startup;
-      // the first entry wins for canonical lookup.
       if (!this.canonicalRoots.has(canonicalRoot)) this.canonicalRoots.set(canonicalRoot, entry.id);
     }
   }
@@ -64,6 +79,15 @@ export class RegisteredWorkspaceRegistry {
     const registration = this.registrations.get(workspaceId);
     if (registration === undefined) throw new CoreError("UNKNOWN_WORKSPACE");
     return { root: registration.root, allowWrite: registration.allowWrite };
+  }
+
+  resolveDevelopment(workspaceId: string): { root: string; remote: string } {
+    const registration = this.registrations.get(workspaceId);
+    if (registration === undefined) throw new CoreError("UNKNOWN_WORKSPACE");
+    if (registration.source !== "manual" || !registration.allowDevelopment || registration.developmentRemote === undefined) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    return { root: registration.root, remote: registration.developmentRemote };
   }
 
   resolveWritable(workspaceId: string): string {
@@ -94,7 +118,13 @@ export class RegisteredWorkspaceRegistry {
     }
     const canonicalRoot = this.canonicalize(root);
     if (this.canonicalRoots.has(canonicalRoot)) throw new CoreError("WORKSPACE_BOUNDARY_VIOLATION");
-    this.registrations.set(id, { root, canonicalRoot, allowWrite, source: "managed" });
+    this.registrations.set(id, {
+      root,
+      canonicalRoot,
+      allowWrite,
+      allowDevelopment: false,
+      source: "managed"
+    });
     this.canonicalRoots.set(canonicalRoot, id);
   }
 
@@ -104,8 +134,6 @@ export class RegisteredWorkspaceRegistry {
     return registration.source;
   }
 
-  // Grants controlled-write authorization for one managed workspace. Manual
-  // workspaces stay authoritative through workspaces.json only. Idempotent.
   authorizeWrite(workspaceId: string): void {
     const registration = this.registrations.get(workspaceId);
     if (registration === undefined) throw new CoreError("UNKNOWN_WORKSPACE");

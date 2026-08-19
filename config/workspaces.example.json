@@ -1,8 +1,15 @@
 [
   {
-    "id": "example-project",
-    "root": "/absolute/path/to/project",
+    "id": "analysis-only-project",
+    "root": "/absolute/path/to/analysis-only-project",
     "allow_write": false
+  },
+  {
+    "id": "trusted-development-project",
+    "root": "/absolute/path/to/trusted-development-project",
+    "allow_write": false,
+    "allow_development": true,
+    "development_remote": "origin"
   },
   {
     "kind": "project_root",

@@ -5,6 +5,14 @@ import type { SerializedError } from "../core/errors.js";
 import { CoreError } from "../core/errors.js";
 import type { Executor, ExecutorEvidence } from "../executors/executor.js";
 import { RegisteredWorkspaceRegistry } from "../workspaces/registered-workspace-registry.js";
+import {
+  buildDevelopmentContinuationInstruction,
+  buildDevelopmentStartInstruction,
+  buildDevelopmentSteerInstruction,
+  isSafeTaskId,
+  isSafeWorkBranch,
+  taskContractPath
+} from "./development-task-instruction.js";
 
 export type ExecutorName = "codex" | "dsh";
 
@@ -14,7 +22,24 @@ export interface RegisteredWorkspaceTaskRequest {
   readonly executor?: ExecutorName;
 }
 
+export interface DevelopmentWorkspaceTaskRequest {
+  readonly workspace_id: string;
+  readonly work_branch: string;
+  readonly task_id: string;
+}
+
 type NormalizedRegisteredWorkspaceTaskRequest = RegisteredWorkspaceTaskRequest & { readonly executor: ExecutorName };
+type InteractiveReadonlyRequest = NormalizedRegisteredWorkspaceTaskRequest & { readonly kind: "readonly" };
+type InteractiveDevelopmentRequest = {
+  readonly kind: "development";
+  readonly workspace_id: string;
+  readonly work_branch: string;
+  readonly task_id: string;
+  readonly remote: string;
+  readonly instruction: string;
+  readonly executor: "codex";
+};
+type InteractiveTaskRequest = InteractiveReadonlyRequest | InteractiveDevelopmentRequest;
 
 export type RegisteredWorkspaceTaskResult =
   | {
@@ -26,9 +51,6 @@ export type RegisteredWorkspaceTaskResult =
     readonly id: Id;
     readonly state: "failed";
     readonly error: SerializedError;
-    // Present only when the executor returned genuine partial output for an
-    // interrupted run; never for ordinary failures and never as completed
-    // output. Empty partial output is omitted entirely.
     readonly partial_output?: string | undefined;
   };
 
@@ -36,16 +58,16 @@ export type ExecutorFactory = (executor: ExecutorName, workspaceRoot: string) =>
 export type CompletedOutputTransform = (output: string) => string;
 
 export type RegisteredWorkspaceTaskState = "queued" | "running" | "completed" | "failed";
-
 export type ControlledTaskState = RegisteredWorkspaceTaskState | "waiting_for_supervisor_review";
+
 export interface ControlledTaskView {
   readonly taskId: Id;
   readonly state: ControlledTaskState;
-  // The executor selection is fixed for the whole task lifetime. It is always
-  // reported honestly: a Codex task may additionally expose its real native
-  // app-server thread id, while a DSH task never gets a fabricated session or
-  // thread id (DSH headless currently has no machine-resumable session seam).
   readonly executor: ExecutorName;
+  readonly taskKind?: "readonly" | "development";
+  readonly workspaceId?: string | undefined;
+  readonly workBranch?: string | undefined;
+  readonly taskContract?: string | undefined;
   readonly threadId?: string | undefined;
   readonly ready?: boolean;
   readonly output?: string | undefined;
@@ -60,21 +82,14 @@ type TaskRecord =
   | { state: "completed" | "failed"; executor: ExecutorName; result: RegisteredWorkspaceTaskResult };
 
 const MAX_TERMINAL_TASK_HISTORY = 100;
-
 export type TerminalTaskHandler = (result: RegisteredWorkspaceTaskResult) => void | Promise<void>;
 
 function interruptedError(executor: ExecutorName): SerializedError {
   return serializeError(new CoreError(executor === "dsh" ? "DSH_EXECUTION_FAILED" : "CODEX_EXECUTION_FAILED"));
 }
 
-// Interrupt keeps the failed terminal state and its existing safe error, and
-// additionally retains the executor's genuine partial output. Empty partial
-// output (interrupt before anything was produced) is not fabricated: the field
-// is simply omitted.
 function interruptedTaskResult(taskId: Id, executor: ExecutorName, partialOutput: string): RegisteredWorkspaceTaskResult {
-  if (partialOutput === "") {
-    return { id: taskId, state: "failed", error: interruptedError(executor) };
-  }
+  if (partialOutput === "") return { id: taskId, state: "failed", error: interruptedError(executor) };
   return { id: taskId, state: "failed", error: interruptedError(executor), partial_output: partialOutput };
 }
 
@@ -100,19 +115,19 @@ export class RegisteredWorkspaceTaskService {
     return { taskId };
   }
 
-  pinTask(taskId: Id): void {
-    this.pinnedTaskIds.add(taskId);
+  runReadonlyTask(
+    request: RegisteredWorkspaceTaskRequest,
+    completedOutputTransform?: CompletedOutputTransform,
+    terminalTaskHandler?: TerminalTaskHandler
+  ): { taskId: Id } {
+    return this.runTask(request, completedOutputTransform, terminalTaskHandler);
   }
 
-  unpinTask(taskId: Id): void {
-    this.pinnedTaskIds.delete(taskId);
-    this.trimLegacyTerminalTasks();
-  }
+  pinTask(taskId: Id): void { this.pinnedTaskIds.add(taskId); }
+  unpinTask(taskId: Id): void { this.pinnedTaskIds.delete(taskId); this.trimLegacyTerminalTasks(); }
 
   restoreControlledPatchTask(taskId: Id, output: string, pinned: boolean, executor: ExecutorName = "codex"): void {
-    if (this.tasks.has(taskId) || this.interactive.has(taskId)) {
-      throw new CoreError("INTERNAL_ERROR");
-    }
+    if (this.tasks.has(taskId) || this.interactive.has(taskId)) throw new CoreError("INTERNAL_ERROR");
     const result: RegisteredWorkspaceTaskResult = { id: taskId, state: "completed", output };
     this.tasks.set(taskId, { state: "completed", executor, result });
     this.legacyTerminalTaskIds.push(taskId);
@@ -133,8 +148,37 @@ export class RegisteredWorkspaceTaskService {
   }
 
   startTask(request: RegisteredWorkspaceTaskRequest): { taskId: Id } {
+    return this.startReadonlyTask(request);
+  }
+
+  startReadonlyTask(request: RegisteredWorkspaceTaskRequest): { taskId: Id } {
     const taskId = newId();
-    const normalizedRequest = { ...request, executor: request.executor ?? "codex" };
+    const normalizedRequest: InteractiveReadonlyRequest = {
+      ...request,
+      kind: "readonly",
+      executor: request.executor ?? "codex"
+    };
+    this.interactive.set(taskId, { state: "queued", request: normalizedRequest, evidence: [] });
+    queueMicrotask(() => void this.executeInteractive(taskId));
+    return { taskId };
+  }
+
+  startDevelopmentTask(request: DevelopmentWorkspaceTaskRequest): { taskId: Id } {
+    if (!isSafeWorkBranch(request.work_branch) || !isSafeTaskId(request.task_id)) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    const registration = this.registry.resolveDevelopment(request.workspace_id);
+    const identity = { remote: registration.remote, workBranch: request.work_branch, taskId: request.task_id };
+    const taskId = newId();
+    const normalizedRequest: InteractiveDevelopmentRequest = {
+      kind: "development",
+      workspace_id: request.workspace_id,
+      work_branch: request.work_branch,
+      task_id: request.task_id,
+      remote: registration.remote,
+      instruction: buildDevelopmentStartInstruction(identity),
+      executor: "codex"
+    };
     this.interactive.set(taskId, { state: "queued", request: normalizedRequest, evidence: [] });
     queueMicrotask(() => void this.executeInteractive(taskId));
     return { taskId };
@@ -160,10 +204,19 @@ export class RegisteredWorkspaceTaskService {
           ...(legacy.result.partial_output === undefined ? {} : { partial_output: legacy.result.partial_output })
         };
     }
+    const developmentIdentity = record.request.kind === "development"
+      ? {
+        taskKind: "development" as const,
+        workspaceId: record.request.workspace_id,
+        workBranch: record.request.work_branch,
+        taskContract: taskContractPath(record.request.task_id)
+      }
+      : {};
     const base: ControlledTaskView = {
       taskId,
       state: record.state,
       executor: record.request.executor,
+      ...developmentIdentity,
       evidence: record.evidence,
       ...(record.threadId === undefined ? {} : { threadId: record.threadId })
     };
@@ -174,9 +227,7 @@ export class RegisteredWorkspaceTaskService {
       ...base,
       ready: true,
       error: record.error,
-      ...(record.partialOutput === undefined || record.partialOutput === ""
-        ? {}
-        : { partial_output: record.partialOutput })
+      ...(record.partialOutput === undefined || record.partialOutput === "" ? {} : { partial_output: record.partialOutput })
     };
   }
 
@@ -191,12 +242,26 @@ export class RegisteredWorkspaceTaskService {
       this.trimInteractiveTerminalTasks();
     } else if (action === "continue") {
       if (record.state !== "waiting_for_supervisor_review" || !instruction?.trim()) throw new CoreError("INVALID_STATE_TRANSITION");
-      record.request = { ...record.request, instruction };
+      if (record.request.kind === "development") {
+        const identity = { remote: record.request.remote, workBranch: record.request.work_branch, taskId: record.request.task_id };
+        record.request = {
+          ...record.request,
+          instruction: buildDevelopmentContinuationInstruction(identity, instruction)
+        };
+      } else {
+        record.request = { ...record.request, instruction };
+      }
       record.state = "queued";
       queueMicrotask(() => void this.executeInteractive(taskId));
     } else if (action === "steer") {
       if (record.state !== "running" || !instruction?.trim() || !record.executor?.steer) throw new CoreError("INVALID_STATE_TRANSITION");
-      await record.executor.steer(instruction);
+      const steered = record.request.kind === "development"
+        ? buildDevelopmentSteerInstruction(
+          { remote: record.request.remote, workBranch: record.request.work_branch, taskId: record.request.task_id },
+          instruction
+        )
+        : instruction;
+      await record.executor.steer(steered);
     } else {
       if (record.state !== "running" || !record.executor?.interrupt) throw new CoreError("INVALID_STATE_TRANSITION");
       await record.executor.interrupt();
@@ -205,9 +270,14 @@ export class RegisteredWorkspaceTaskService {
   }
 
   private readonly interactive = new Map<Id, {
-    state: ControlledTaskState; request: NormalizedRegisteredWorkspaceTaskRequest; evidence: readonly ExecutorEvidence[];
-    executor?: Executor | undefined; threadId?: string | undefined; output?: string | undefined;
-    partialOutput?: string | undefined; error?: SerializedError | undefined;
+    state: ControlledTaskState;
+    request: InteractiveTaskRequest;
+    evidence: readonly ExecutorEvidence[];
+    executor?: Executor | undefined;
+    threadId?: string | undefined;
+    output?: string | undefined;
+    partialOutput?: string | undefined;
+    error?: SerializedError | undefined;
   }>();
   private interactiveTerminalTaskIds: Id[] = [];
 
@@ -216,25 +286,35 @@ export class RegisteredWorkspaceTaskService {
     if (!record) return;
     record.state = "running";
     try {
-      const registration = this.registry.resolveExecution(record.request.workspace_id);
+      const registration = record.request.kind === "development"
+        ? this.registry.resolveDevelopment(record.request.workspace_id)
+        : this.registry.resolveExecution(record.request.workspace_id);
       const executor = this.executorFactory(record.request.executor, registration.root);
       record.executor = executor;
-      const result = await executor.execute({ taskId, instruction: record.request.instruction,
-        sandbox: "read-only", threadId: record.threadId,
-        onEvidence: (items) => { record.evidence = items; } });
+      const result = await executor.execute({
+        taskId,
+        instruction: record.request.instruction,
+        ...(record.request.kind === "development"
+          ? { executionMode: "development" as const }
+          : { executionMode: "readonly" as const, sandbox: "read-only" as const }),
+        threadId: record.threadId,
+        onEvidence: (items) => { record.evidence = items; }
+      });
       record.executor = undefined;
       record.threadId = result.threadId ?? record.threadId;
       record.evidence = result.evidence ?? record.evidence;
-      if (result.kind === "failed") { record.state = "failed"; record.error = result.error; }
-      else if (result.kind === "interrupted") {
-        // The failed terminal state and its safe error are unchanged; the
-        // executor's genuine partial output is retained separately and never
-        // treated as completed review output.
+      if (result.kind === "failed") {
+        record.state = "failed";
+        record.error = result.error;
+      } else if (result.kind === "interrupted") {
         record.partialOutput = result.output;
         record.output = undefined;
         record.state = "failed";
         record.error = interruptedError(record.request.executor);
-      } else { record.state = "waiting_for_supervisor_review"; record.output = result.output; }
+      } else {
+        record.state = "waiting_for_supervisor_review";
+        record.output = result.output;
+      }
       if (record.state === "failed") this.recordInteractiveTerminalTask(taskId);
     } catch (error) {
       record.executor = undefined;
@@ -259,20 +339,14 @@ export class RegisteredWorkspaceTaskService {
         ? {
           id: taskId,
           state: "completed",
-          output: completedOutputTransform === undefined
-            ? result.output
-            : completedOutputTransform(result.output)
+          output: completedOutputTransform === undefined ? result.output : completedOutputTransform(result.output)
         }
         : result.kind === "failed"
           ? { id: taskId, state: "failed", error: result.error }
           : interruptedTaskResult(taskId, request.executor, result.output);
       await this.recordLegacyTerminalTask(taskId, taskResult, terminalTaskHandler);
     } catch (error) {
-      const result: RegisteredWorkspaceTaskResult = {
-        id: taskId,
-        state: "failed",
-        error: serializeError(error)
-      };
+      const result: RegisteredWorkspaceTaskResult = { id: taskId, state: "failed", error: serializeError(error) };
       await this.recordLegacyTerminalTask(taskId, result);
     }
   }
@@ -300,10 +374,7 @@ export class RegisteredWorkspaceTaskService {
       return task?.state === "completed" || task?.state === "failed";
     });
     const unpinnedTaskIds = terminalTaskIds.filter((taskId) => !this.pinnedTaskIds.has(taskId));
-    const evictedTaskIds = new Set(unpinnedTaskIds.slice(
-      0,
-      Math.max(0, unpinnedTaskIds.length - MAX_TERMINAL_TASK_HISTORY)
-    ));
+    const evictedTaskIds = new Set(unpinnedTaskIds.slice(0, Math.max(0, unpinnedTaskIds.length - MAX_TERMINAL_TASK_HISTORY)));
     for (const taskId of evictedTaskIds) this.tasks.delete(taskId);
     this.legacyTerminalTaskIds = terminalTaskIds.filter((taskId) => !evictedTaskIds.has(taskId));
   }
@@ -313,10 +384,7 @@ export class RegisteredWorkspaceTaskService {
       const task = this.interactive.get(taskId);
       return task?.state === "completed" || task?.state === "failed";
     });
-    const evictedTaskIds = new Set(terminalTaskIds.slice(
-      0,
-      Math.max(0, terminalTaskIds.length - MAX_TERMINAL_TASK_HISTORY)
-    ));
+    const evictedTaskIds = new Set(terminalTaskIds.slice(0, Math.max(0, terminalTaskIds.length - MAX_TERMINAL_TASK_HISTORY)));
     for (const taskId of evictedTaskIds) this.interactive.delete(taskId);
     this.interactiveTerminalTaskIds = terminalTaskIds.filter((taskId) => !evictedTaskIds.has(taskId));
   }
