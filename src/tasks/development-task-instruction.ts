@@ -17,10 +17,10 @@ export function isSafeRemoteName(value: string): boolean {
 }
 
 export function isSafeWorkBranch(value: string): boolean {
-  if (value.length === 0 || value.length > 255 || value === "@" || value.startsWith("-")) return false;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(value)) return false;
+  if (value.length > 255 || value === "@" || value.startsWith("-")) return false;
   if (value.startsWith("/") || value.endsWith("/") || value.includes("//")) return false;
   if (value.includes("..") || value.includes("@{") || value.includes("\\")) return false;
-  if (/[\x00-\x20\x7f~^:?*\[]/u.test(value)) return false;
   const segments = value.split("/");
   return segments.every((segment) =>
     segment.length > 0 &&
