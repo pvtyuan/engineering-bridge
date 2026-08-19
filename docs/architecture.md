@@ -1,32 +1,114 @@
 # Architecture
 
-This document describes the Engineering Bridge V1 (1.2.0) behavior.
+Engineering Bridge V2 separates three execution paths while reusing one supervisor task lifecycle.
 
-Engineering Bridge is a local STDIO MCP server with nine tools and a small layered structure:
+```text
+MCP supervisor
+   |
+   +-- run_readonly_task --------> RegisteredWorkspaceTaskService
+   |                                  |
+   |                                  +--> Codex(readonly) / DSH(readonly)
+   |
+   +-- run_development_task -----> RegisteredWorkspaceTaskService
+   |                                  |
+   |                                  +--> Codex(development)
+   |                                         |
+   |                                         +--> outer trusted sandbox
+   |
+   +-- generate/refine patch ----> ControlledPatchService
+                                      |
+                                      +--> readonly executor
+                                      +--> reviewed Bridge APPLY
+```
 
-1. `src/mcp-stdio.ts` loads trusted workspace configuration (manual entries plus `project_root` approved roots), loads the managed-workspace catalog, registers all nine tools (`run_task`, `task_result`, `control_task`, `bind_project`, `create_project`, `authorize_workspace_write`, `generate_controlled_patch`, `refine_controlled_patch`, `apply_controlled_patch`), and connects the MCP STDIO transport.
-2. `RegisteredWorkspaceRegistry` maps fixed caller-visible IDs to absolute configured roots, distinguishing manual registrations (authoritative through `workspaces.json`) from managed registrations. `ManagedWorkspaceCatalog` persists managed registrations and their controlled-write authorization to `<config>.managed-workspaces.json` with atomic 0600 writes. `WorkspaceOnboardingService` implements `bind_project`/`create_project` (exact `BIND`/`CREATE`, canonical containment inside `project_root`) and `authorize_workspace_write` (exact `AUTHORIZE`, managed workspaces only, persist-before-apply).
-3. `RegisteredWorkspaceTaskService` assigns UUID task IDs and holds task, supervisor-review, thread, output, partial-output, error, and evidence state in process memory. It resolves the requested executor through an `ExecutorFactory` and drives `CodexExecutor` or `DshExecutor`.
-4. `CodexExecutor` starts the local `codex app-server --stdio` protocol with fixed read-only task settings. `DshExecutor` starts the official headless `dsh` interface with a per-process `DSH_PERMISSION_MODE=read-only` pin and an explicit environment allowlist (including `DEEPSEEK_API_KEY` and `DSH_TOOLS_MODE`; proxy variables excluded). `ControlledPatchService` records proposal metadata (persisted to `<config>.controlled-patches.json`) and uses fixed Git commands to validate and apply reviewed patches.
+## Workspace registry
 
-There is no HTTP server, UI, database, account system, background daemon, remote transport, or general command runner.
+Manual workspace configuration is authoritative. A registration may independently grant:
 
-## Read-only supervised task flow
+```text
+allow_write
+    controlled-patch APPLY permission
 
-`run_task` is always read-only and accepts an optional `executor: "codex" | "dsh"` (default `codex`). Codex runs with approval `never`, a read-only sandbox policy, and network access disabled. The Codex executor starts native app-server threads with `thread/start`; after supervisor feedback it preserves the returned thread ID and uses `thread/resume`, followed by a new turn, so the conversation continues on the same Codex thread. The DSH executor runs each task as a headless invocation; it has no machine-resumable session seam, so a DSH `continue` is a new execution and no thread id is fabricated.
+allow_development + development_remote
+    trusted formal-development permission
+```
 
-`task_result` reports `queued` or `running` with `ready: false`. A successful turn moves to `waiting_for_supervisor_review` with `ready: true` and `review_output`. The response also includes the fixed `executor`, a real native `thread_id` when one exists (Codex only), the bounded, process-local `evidence` collected from command-execution and file-change protocol items, and `partial_output` when a genuine interrupt produced real partial output (the task still ends `failed`). Evidence is diagnostic task output, not authorization to write or proof that a requested semantic result is correct; when existing bounds truncate or evict evidence, explicit markers (`[truncated]`, changes-omitted counts, an `evidence-drop` item) make the incompleteness visible.
+`allow_write` and `allow_development` are deliberately not interchangeable.
 
-`control_task` supplies the supervisor transitions. `continue` requires a non-empty instruction while waiting for review and resumes the same Codex thread for another read-only turn (DSH: a new headless execution). `steer` requires a non-empty instruction while a turn is running and sends it to that turn (Codex only). `interrupt` is valid only while running; an interrupted turn ends in `failed`, not in a resumable review state. `accept` is valid only while waiting for review and promotes the reviewed output to `completed` as `output`.
+Managed workspaces created through onboarding can gain controlled-write permission, but never trusted-development permission. There is no MCP tool that can self-authorize development access.
 
-Active task supervision state (tasks, threads, evidence, review outputs) is process-local and disappears on restart. Controlled-patch proposals/applied history and the managed workspace catalog persist across restarts through the two state files. There is no automatic timeout, automatic acceptance, or persistent task/audit history.
+## Read-only task path
 
-These executor parameters restrict writes performed by Codex and DSH, but Bridge does not create OS-level filesystem read containment. A same-user executor process may read paths outside the workspace when the operating system permits it.
+`run_readonly_task` starts an interactive supervised task with Codex or DSH. The TaskService records the selected executor and reuses the existing lifecycle:
 
-## Controlled patch flow
+```text
+queued
+  -> running
+  -> waiting_for_supervisor_review
+  -> completed
 
-Controlled writes are a separate path. `generate_controlled_patch` and `refine_controlled_patch` are read-only proposal flows available in any registered workspace; no write authorization is required. Generation verifies that the configured root resolves to the Git top-level and that tracked state and the index are clean (with an existing HEAD, or unborn-repository support for added-file proposals), records the base HEAD, and schedules the executor, still read-only, to produce a textual unified-diff proposal. Proposals and applied history persist to `<config>.controlled-patches.json`; invalid retained records are quarantined without blocking startup, while replay/applied ambiguity and global invariants fail closed.
+or -> failed
+```
 
-`apply_controlled_patch` is the single controlled-write checkpoint: it requires controlled-write permission (managed `AUTHORIZE` or a manual `allow_write: true` entry), confirmation equal to exact, case-sensitive `APPLY`, a known completed proposal that has not already been applied, the original HEAD (including unborn base), a clean tracked worktree and index, and a safe unified text patch. Targets may modify existing tracked regular files or add an ordinary text file using exact mode 100644 when that path is absent from base HEAD, the current index, and the worktree. Bridge then runs fixed `git apply --check` and `git apply` commands without a shell. It does not run tests, stage, commit, or push.
+Codex thread IDs are reused for continuation when available. DSH does not fabricate a resumable thread ID.
 
-The generation prompt asks the executor for a narrow valid diff, but prompt compliance is not a security boundary. Patch validation is code-enforced; whether the proposed semantic change is desirable remains a human review decision.
+## Development task path
+
+`run_development_task` accepts only `workspace_id`, `work_branch`, and `task_id`. The service resolves the locally configured development remote, constructs an immutable development identity, and generates a deterministic bootstrap instruction.
+
+The development identity is:
+
+```text
+workspace_id
+remote
+work_branch
+task_id -> tasks/<task_id>.md
+executor = codex
+executionMode = development
+```
+
+The same identity is retained across `continue` and `steer`. The supervisor cannot change remote, branch or task through continuation text.
+
+## Bootstrap boundary
+
+The bootstrap instruction is intentionally procedural rather than embedding repository-specific implementation rules. It verifies clean state, exact remote/branch, fast-forward-only synchronization, Task Contract existence, `AGENTS.md`, Required References and repository Preflight. The repository's own contract remains the source of truth for implementation details.
+
+This avoids duplicating product-development policy inside Engineering Bridge.
+
+## Executor semantic mode
+
+The executor interface carries a Bridge-level semantic mode:
+
+```ts
+ExecutionMode = "readonly" | "development"
+```
+
+Codex maps that semantic mode to the app-server protocol:
+
+```text
+readonly:
+  thread sandbox = read-only
+  turn policy = readOnly
+  network = false
+
+development:
+  thread sandbox = danger-full-access
+  turn policy = externalSandbox
+  network = enabled
+```
+
+The development mapping means the outer development container/OS sandbox is the isolation boundary. The Bridge does not attempt to provide a second, incomplete Git sandbox around formal development work.
+
+## Environment ownership
+
+Readonly Codex receives the minimal historical environment allowlist. Development additionally receives proxy variables and `SSH_AUTH_SOCK`, because Git fetch/push and project dependency access often require them.
+
+High-value API/token variables such as `OPENAI_API_KEY`, `GH_TOKEN`, and `GITHUB_TOKEN` are not forwarded by default. Codex auth is expected through HOME/CODEX_HOME; Git/gh auth is owned by the trusted outer environment.
+
+## Controlled patch path
+
+ControlledPatchService remains structurally separate. Proposal generation is read-only and APPLY is performed by Bridge after validation and explicit confirmation. It does not use the trusted development path and does not commit or push.
+
+## State ownership
+
+Bridge stores temporary supervisor state only: task state, executor, thread id when available, bounded evidence, review output and immutable development identity. It does not mirror a full executor transcript. Codex remains the source of truth for its native thread history.
