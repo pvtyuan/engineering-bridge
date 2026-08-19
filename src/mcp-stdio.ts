@@ -12,6 +12,7 @@ import { DshExecutor } from "./executors/dsh-executor.js";
 import { VERSION } from "./version.js";
 import { CoreError, serializeError } from "./core/errors.js";
 import { RegisteredWorkspaceTaskService } from "./tasks/registered-workspace-task-service.js";
+import { isSafeTaskId, isSafeWorkBranch } from "./tasks/development-task-instruction.js";
 import { ControlledPatchService } from "./tasks/controlled-patch-service.js";
 import { ManagedWorkspaceCatalog } from "./workspaces/managed-workspace-catalog.js";
 import { RegisteredWorkspaceRegistry } from "./workspaces/registered-workspace-registry.js";
@@ -20,7 +21,9 @@ import { WorkspaceOnboardingService } from "./workspaces/workspace-onboarding-se
 const WorkspaceEntrySchema = z.object({
   id: z.string().min(1),
   root: z.string().min(1),
-  allow_write: z.boolean().optional()
+  allow_write: z.boolean().optional(),
+  allow_development: z.boolean().optional(),
+  development_remote: z.string().min(1).optional()
 }).strict();
 
 const ProjectRootEntrySchema = z.object({
@@ -29,6 +32,8 @@ const ProjectRootEntrySchema = z.object({
 }).strict();
 
 const WorkspaceConfigSchema = z.array(z.union([WorkspaceEntrySchema, ProjectRootEntrySchema]));
+const WorkBranchSchema = z.string().min(1).max(255).refine(isSafeWorkBranch, "Invalid Git work branch.");
+const TaskIdSchema = z.string().min(1).refine(isSafeTaskId, "Invalid development task id.");
 
 type WorkspaceEntry = z.infer<typeof WorkspaceEntrySchema>;
 type ProjectRootEntry = z.infer<typeof ProjectRootEntrySchema>;
@@ -61,8 +66,6 @@ async function main(): Promise<void> {
   const workspaceEntries = parsed.filter((entry): entry is WorkspaceEntry => !isProjectRootEntry(entry));
   const projectRootEntries = parsed.filter(isProjectRootEntry);
   for (const entry of projectRootEntries) {
-    // project_root entries share the manual workspace root semantics: absolute
-    // and already normalized, rejected at startup otherwise.
     if (!isAbsolute(entry.root) || normalize(entry.root) !== entry.root) {
       throw new CoreError("WORKSPACE_BOUNDARY_VIOLATION");
     }
@@ -100,36 +103,60 @@ async function main(): Promise<void> {
   await controlledPatches.load();
   const server = new McpServer({ name: "engineering-bridge", version: VERSION });
 
-  server.registerTool("run_task", {
-    description: "Run a read-only task with the selected executor in a pre-registered workspace. This tool does not modify workspace files.",
+  server.registerTool("run_readonly_task", {
+    description: "Run a supervised read-only analysis/review task with Codex or DSH. This tool cannot modify files, switch branches, commit, push, or create PRs. For an approved formal implementation task, use run_development_task instead.",
     inputSchema: {
       workspace_id: z.string().min(1),
       instruction: z.string().min(1),
       executor: z.enum(["codex", "dsh"]).optional().default("codex")
     }
   }, ({ workspace_id, instruction, executor }) => {
-    const { taskId } = service.startTask({ workspace_id, instruction, executor });
+    const { taskId } = service.startReadonlyTask({ workspace_id, instruction, executor });
     return jsonContent({ task_id: taskId });
   });
 
+  server.registerTool("run_development_task", {
+    description: "Run one approved formal development Task Contract with Codex. The exact workspace, work branch, and task id are fixed for the task lifetime. This may fetch/switch the approved branch, modify files, run tests, update reports/docs, commit, push, and create/update the task PR. Local workspaces.json must explicitly grant allow_development and bind development_remote; this MCP server cannot self-authorize development access.",
+    inputSchema: {
+      workspace_id: z.string().min(1),
+      work_branch: WorkBranchSchema,
+      task_id: TaskIdSchema
+    }
+  }, ({ workspace_id, work_branch, task_id }) => {
+    try {
+      const { taskId } = service.startDevelopmentTask({ workspace_id, work_branch, task_id });
+      return jsonContent({ task_id: taskId });
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
+  });
+
   server.registerTool("task_result", {
-    description: "Retrieve the completed output or safe error for a task. This tool is read-only.",
+    description: "Retrieve supervised task state, completed/review output, evidence, safe errors, and development identity when applicable. This tool is read-only.",
     inputSchema: { task_id: z.string() }
   }, ({ task_id }) => {
     const view = service.taskView(task_id);
     if (view === undefined) return unknownTask();
-    return jsonContent({ task_id: view.taskId, state: view.state, executor: view.executor,
+    return jsonContent({
+      task_id: view.taskId,
+      state: view.state,
+      executor: view.executor,
+      task_kind: view.taskKind,
+      ...(view.workspaceId === undefined ? {} : { workspace_id: view.workspaceId }),
+      ...(view.workBranch === undefined ? {} : { work_branch: view.workBranch }),
+      ...(view.taskContract === undefined ? {} : { task_contract: view.taskContract }),
       ...(view.threadId === undefined ? {} : { thread_id: view.threadId }),
       ready: view.ready,
       ...(view.output === undefined ? {} : { output: view.output }),
       ...(view.review_output === undefined ? {} : { review_output: view.review_output }),
       ...(view.partial_output === undefined ? {} : { partial_output: view.partial_output }),
       evidence: view.evidence,
-      ...(view.error === undefined ? {} : { error: view.error }) });
+      ...(view.error === undefined ? {} : { error: view.error })
+    });
   });
 
   server.registerTool("control_task", {
-    description: "Steer or interrupt a running task, continue a reviewed task, or accept reviewed output.",
+    description: "Steer or interrupt a running task, continue a reviewed task, or accept reviewed output. Development tasks retain the same workspace/branch/task/remote identity across continue and steer.",
     inputSchema: {
       task_id: z.string(),
       action: z.enum(["continue", "steer", "interrupt", "accept"]),
@@ -146,7 +173,7 @@ async function main(): Promise<void> {
   });
 
   server.registerTool("bind_project", {
-    description: "Register an existing local project directory as a read-only workspace. The path must already exist inside a configured project_root and the call requires exact BIND confirmation.",
+    description: "Register an existing local project directory as a read-only managed workspace. The path must already exist inside a configured project_root and the call requires exact BIND confirmation. Managed workspaces cannot gain trusted development permission through MCP.",
     inputSchema: {
       project_path: z.string().min(1),
       confirmation: z.literal("BIND")
@@ -160,7 +187,7 @@ async function main(): Promise<void> {
   });
 
   server.registerTool("create_project", {
-    description: "Create a new empty Git project directory inside a configured project_root and register it as a read-only workspace. The call requires exact CREATE confirmation; only mkdir and git init are performed.",
+    description: "Create a new empty Git project directory inside a configured project_root and register it as a read-only managed workspace. The call requires exact CREATE confirmation; only mkdir and git init are performed. Managed workspaces cannot gain trusted development permission through MCP.",
     inputSchema: {
       parent: z.string().min(1),
       name: z.string().min(1),
@@ -175,7 +202,7 @@ async function main(): Promise<void> {
   });
 
   server.registerTool("authorize_workspace_write", {
-    description: "Grant persistent controlled-write authorization to a managed workspace after exact AUTHORIZE confirmation. Manual workspaces remain authoritative through workspaces.json. Ordinary run_task calls stay read-only.",
+    description: "Grant persistent controlled-patch APPLY authorization to a managed workspace after exact AUTHORIZE confirmation. This does not grant trusted development access. Manual workspaces remain authoritative through workspaces.json. run_readonly_task always stays read-only.",
     inputSchema: {
       workspace_id: z.string().min(1),
       confirmation: z.literal("AUTHORIZE")
@@ -189,7 +216,7 @@ async function main(): Promise<void> {
   });
 
   server.registerTool("generate_controlled_patch", {
-    description: "Generate a read-only patch proposal for review in any registered Git workspace; generation requires no write authorization, and controlled-write authorization is required only to APPLY.",
+    description: "Generate a read-only patch proposal for review in any registered Git workspace. Use this for explicitly reviewed patch APPLY workflows, not for a formal repository development Task with an existing work branch and Task Contract; use run_development_task for that.",
     inputSchema: {
       workspace_id: z.string().min(1),
       change_request: z.string().min(1),
@@ -221,7 +248,7 @@ async function main(): Promise<void> {
   });
 
   server.registerTool("apply_controlled_patch", {
-    description: "Apply one reviewed patch proposal after exact APPLY confirmation. This tool can modify validated tracked text files or add absent 100644 text files, but never stages, commits, or pushes.",
+    description: "Apply one reviewed patch proposal after exact APPLY confirmation. This can modify validated tracked text files or add absent 100644 text files, but never stages, commits, pushes, or grants development authorization.",
     inputSchema: {
       patch_task_id: z.string().min(1),
       confirmation: z.literal("APPLY")
