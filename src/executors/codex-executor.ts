@@ -7,11 +7,11 @@ import type { ExecutionMode, Executor, ExecutorEvidence, ExecutorRequest, Execut
 
 export type ProcessStarter = (executable: string, args: readonly string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 const ENVIRONMENT_ALLOWLIST = ["PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME"] as const;
-const DEVELOPMENT_ENVIRONMENT_ALLOWLIST = [
+const CODEX_TRANSPORT_ENVIRONMENT_ALLOWLIST = [
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-  "http_proxy", "https_proxy", "all_proxy", "no_proxy",
-  "SSH_AUTH_SOCK"
+  "http_proxy", "https_proxy", "all_proxy", "no_proxy"
 ] as const;
+const DEVELOPMENT_ENVIRONMENT_ALLOWLIST = ["SSH_AUTH_SOCK"] as const;
 const MAX_EVIDENCE = 50;
 const MAX_TEXT = 16_384;
 const CODEX_NODE_TARGET = ["@openai", "codex", "bin", "codex.js"] as const;
@@ -36,6 +36,7 @@ function failedTurn(turn: Record<string, unknown>): ExecutorResult {
 function environment(host: Readonly<NodeJS.ProcessEnv>, executionMode: ExecutionMode): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = {};
   for (const key of ENVIRONMENT_ALLOWLIST) if (host[key]) result[key] = host[key];
+  for (const key of CODEX_TRANSPORT_ENVIRONMENT_ALLOWLIST) if (host[key]) result[key] = host[key];
   if (executionMode === "development") {
     for (const key of DEVELOPMENT_ENVIRONMENT_ALLOWLIST) if (host[key]) result[key] = host[key];
   }
