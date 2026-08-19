@@ -3,19 +3,18 @@ import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "n
 import { CoreError, serializeError } from "../core/errors.js";
 import { VERSION } from "../version.js";
 import { resolveCommand } from "./command-resolution.js";
-import type { Executor, ExecutorEvidence, ExecutorRequest, ExecutorResult } from "./executor.js";
+import type { ExecutionMode, Executor, ExecutorEvidence, ExecutorRequest, ExecutorResult } from "./executor.js";
 
 export type ProcessStarter = (executable: string, args: readonly string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 const ENVIRONMENT_ALLOWLIST = ["PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME"] as const;
+const DEVELOPMENT_ENVIRONMENT_ALLOWLIST = [
+  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+  "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+  "SSH_AUTH_SOCK"
+] as const;
 const MAX_EVIDENCE = 50;
 const MAX_TEXT = 16_384;
-// Official npm target of the Codex CLI, derived from a codex.cmd shim's
-// location so a Windows npm install can be launched through Node directly
-// (never through a shell).
 const CODEX_NODE_TARGET = ["@openai", "codex", "bin", "codex.js"] as const;
-// Machine- and human-readable marker appended to any bounded evidence string
-// that was cut by MAX_TEXT, and the basis of the synthetic change/evidence
-// entries that make list and count truncation visible.
 const TRUNCATION_MARKER = "[truncated]";
 
 function failure(code: "CODEX_UNAVAILABLE" | "CODEX_PROTOCOL_ERROR" | "CODEX_EXECUTION_FAILED"): ExecutorResult {
@@ -34,18 +33,18 @@ function failedTurn(turn: Record<string, unknown>): ExecutorResult {
   }
   return failure("CODEX_EXECUTION_FAILED");
 }
-function environment(host: Readonly<NodeJS.ProcessEnv>): NodeJS.ProcessEnv {
+function environment(host: Readonly<NodeJS.ProcessEnv>, executionMode: ExecutionMode): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = {};
   for (const key of ENVIRONMENT_ALLOWLIST) if (host[key]) result[key] = host[key];
+  if (executionMode === "development") {
+    for (const key of DEVELOPMENT_ENVIRONMENT_ALLOWLIST) if (host[key]) result[key] = host[key];
+  }
   return result;
 }
 function object(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
 function bounded(value: unknown): string {
   if (typeof value !== "string") return "";
   if (value.length <= MAX_TEXT) return value;
-  // The marker must fit inside the MAX_TEXT budget: its length plus the
-  // newline separator is deducted from the retained content, so the final
-  // string never exceeds MAX_TEXT.
   const retained = MAX_TEXT - TRUNCATION_MARKER.length - 1;
   return `${value.slice(0, retained)}\n${TRUNCATION_MARKER}`;
 }
@@ -65,17 +64,15 @@ export class CodexExecutor implements Executor {
   async execute(request: ExecutorRequest): Promise<ExecutorResult> {
     this.turnId = undefined;
     this.startedTurnId = undefined;
+    const executionMode = request.executionMode ?? "readonly";
     let child: ChildProcessWithoutNullStreams;
     try {
       const options: SpawnOptionsWithoutStdio = {
-        cwd: this.workspaceRoot, shell: false, stdio: ["pipe", "pipe", "pipe"], env: environment(this.hostEnvironment)
+        cwd: this.workspaceRoot,
+        shell: false,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: environment(this.hostEnvironment, executionMode)
       };
-      // Windows: a directly spawnable codex.exe is preferred; an npm-installed
-      // codex.cmd shim is resolved to the official bin/codex.js Node target and
-      // launched through Node directly. Nothing here goes through a shell, and
-      // the user instruction travels over stdin, never through the command
-      // line. Everywhere else (and as the Windows fallback) the original bare
-      // "codex" spawn is unchanged.
       const resolved = resolveCommand(this.hostEnvironment, "codex", {
         nodeTarget: CODEX_NODE_TARGET, platform: this.platform
       });
@@ -111,11 +108,6 @@ export class CodexExecutor implements Executor {
       if (!child.killed) child.kill();
     };
     const unavailable = (): void => finish(failure("CODEX_UNAVAILABLE"));
-    // The evidence view a supervisor receives. Real evidence and the synthetic
-    // evidence-drop marker together never exceed MAX_EVIDENCE: the marker only
-    // appears once real entries were evicted, and the eviction loop above
-    // reserves its slot within the same budget. Rebuilt from a single counter,
-    // it can never grow evidence unboundedly.
     const visibleEvidence = (): readonly ExecutorEvidence[] => {
       const items = [...evidence.values()];
       return evidenceDropped === 0
@@ -165,23 +157,14 @@ export class CodexExecutor implements Executor {
             if (item.type === "commandExecution") entry = { id, type: item.type, status, command: bounded(item.command) };
             else {
               const rawChanges = Array.isArray(item.changes) ? item.changes : [];
-              // The 50-entry bound includes the synthetic truncation marker: a
-              // truncated list keeps 49 real entries and spends the 50th slot
-              // on the marker, so the final list never exceeds the bound.
               const kept = rawChanges.length > 50 ? 49 : 50;
               const changes = rawChanges.slice(0, kept).filter(object).map((c) => ({ path: bounded(c.path), diff: bounded(c.diff) }));
               if (rawChanges.length > 50) {
-                // omitted counts exactly the real changes that were never
-                // returned to the supervisor.
                 changes.push({ path: `[truncated: ${rawChanges.length - kept} additional changes omitted]`, diff: "" });
               }
               entry = { id, type: item.type, status, changes };
             }
             evidence.set(id, entry);
-            // The MAX_EVIDENCE budget includes the evidence-drop marker: once
-            // any drop has happened the marker reserves one slot within the
-            // same budget, so the final visible list never exceeds
-            // MAX_EVIDENCE entries.
             while (evidence.size + (evidenceDropped > 0 ? 1 : 0) > MAX_EVIDENCE) {
               evidence.delete(evidence.keys().next().value as string);
               evidenceDropped += 1;
@@ -209,16 +192,24 @@ export class CodexExecutor implements Executor {
     try {
       await this.call("initialize", { clientInfo: { name: "engineering-bridge", version: VERSION } });
       this.notify("initialized", {});
-      const sandbox = request.sandbox ?? "read-only";
+      const sandbox = executionMode === "development" ? "danger-full-access" : (request.sandbox ?? "read-only");
       const threadParams: Record<string, unknown> = { cwd: this.workspaceRoot, approvalPolicy: "never", sandbox };
       if (request.threadId) threadParams.threadId = request.threadId;
       const threadResult = await this.call(request.threadId ? "thread/resume" : "thread/start", threadParams);
       if (!object(threadResult) || !object(threadResult.thread) || typeof threadResult.thread.id !== "string") throw new Error();
       this.threadId = threadResult.thread.id;
-      const sandboxPolicy = sandbox === "workspace-write"
-        ? { type: "workspaceWrite", writableRoots: [this.workspaceRoot], networkAccess: false }
-        : { type: "readOnly", networkAccess: false };
-      const turnResult = await this.call("turn/start", { threadId: this.threadId, input: [{ type: "text", text: request.instruction }], cwd: this.workspaceRoot, approvalPolicy: "never", sandboxPolicy });
+      const sandboxPolicy = executionMode === "development"
+        ? { type: "externalSandbox", networkAccess: "enabled" }
+        : sandbox === "workspace-write"
+          ? { type: "workspaceWrite", writableRoots: [this.workspaceRoot], networkAccess: false }
+          : { type: "readOnly", networkAccess: false };
+      const turnResult = await this.call("turn/start", {
+        threadId: this.threadId,
+        input: [{ type: "text", text: request.instruction }],
+        cwd: this.workspaceRoot,
+        approvalPolicy: "never",
+        sandboxPolicy
+      });
       if (!object(turnResult) || !object(turnResult.turn) || typeof turnResult.turn.id !== "string") throw new Error();
       this.turnId = turnResult.turn.id;
       if (this.startedTurnId !== this.turnId) this.startedTurnId = undefined;
