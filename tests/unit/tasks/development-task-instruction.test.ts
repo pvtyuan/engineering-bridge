@@ -18,7 +18,7 @@ test("task ids are conservative tokens and cannot escape tasks/", () => {
   assert.equal(taskContractPath("DEV-001"), "tasks/DEV-001.md");
 });
 
-test("remote names and work branches reject dangerous Git syntax", () => {
+test("remote names and work branches reject dangerous Git and shell syntax", () => {
   for (const value of ["origin", "github-data-agent", "upstream_1"]) assert.equal(isSafeRemoteName(value), true);
   for (const value of ["", "bad remote", "../origin", "remote..name", "origin/main"]) {
     assert.equal(isSafeRemoteName(value), false, value);
@@ -29,7 +29,8 @@ test("remote names and work branches reject dangerous Git syntax", () => {
   }
   for (const value of [
     "", "-main", "/main", "main/", "feature//x", "feature/../main", "feature/@{1}",
-    "feature\\x", "feature x", "feature:x", ".hidden/x", "feature/x.lock"
+    "feature\\x", "feature x", "feature:x", ".hidden/x", "feature/x.lock",
+    "feature/$HOME", "feature/a;b", "feature/a&b", "feature/a|b", "feature/`cmd`", "feature/$(cmd)"
   ]) {
     assert.equal(isSafeWorkBranch(value), false, value);
   }
