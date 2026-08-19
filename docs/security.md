@@ -1,47 +1,135 @@
-# Security design
+# Security Design
 
-This document separates enforced behavior from operating assumptions for the Engineering Bridge V1 (1.2.0).
+Engineering Bridge V2 has two materially different security modes and one controlled-apply path. They must not be conflated.
 
-## Enforced in code
+## Read-only supervision
 
-- MCP callers select only workspace IDs loaded from trusted startup configuration or registered through approved managed onboarding.
-- `run_task`, continued turns, steering, and controlled-patch generation use read-only executor execution. Codex app-server is started without a shell through `codex app-server --stdio`, with approval `never` and network access disabled. DSH runs through the official headless interface with `DSH_PERMISSION_MODE=read-only` pinned per process; the pin cannot be overridden by the host environment, and only an explicit environment allowlist (including `DEEPSEEK_API_KEY` and `DSH_TOOLS_MODE`) is forwarded. Proxy variables are never forwarded.
-- Supervisor actions are state checked: `continue` and `accept` require `waiting_for_supervisor_review`; `steer` and `interrupt` require `running`; instructions for `continue` and `steer` must be non-empty. Interrupt completion ends the task as `failed`.
-- `partial_output` is returned only from a genuine interrupted executor result; the task state stays `failed`, and ordinary failures never re-expose stderr or partial stdout.
-- Codex evidence stays within its existing bounds (string length, changes count, total entry count); truncation and eviction are made visible through explicit markers rather than silently dropped. Markers indicate incomplete diagnostic information, not a complete transcript.
-- Write access defaults to disabled. Manual workspaces enable it through `allow_write: true` in `workspaces.json`; managed workspaces grant it only through `authorize_workspace_write` with exact `AUTHORIZE`, which never modifies a manual registration.
-- Controlled patch generation and refinement are read-only and require no write authorization; they verify a clean Git top-level (existing HEAD or unborn-base support) and record the base HEAD. Files are not modified during generation or refinement.
-- Application requires exact, case-sensitive `APPLY`, a completed one-use proposal, controlled-write permission, and rechecks the canonical Git root, HEAD, and clean tracked worktree/index before validating the patch.
-- Patch validation accepts modifications to existing tracked regular files and exact 100644 ordinary text-file additions whose target is absent from base HEAD, the index, and the worktree; unborn bases support additions only.
-- Deletions, rename/copy, binary patches, mode changes, executable additions, symlinks, submodules, unsafe paths, duplicate paths, and malformed or inconsistent headers are rejected.
-- Bridge invokes only fixed `git apply --check` and `git apply` operations for application. It never automatically tests, stages, commits, or pushes.
-- Returned executor failures use fixed safe messages rather than forwarding stderr.
+`run_readonly_task` preserves the original low-privilege model:
 
-## Workspace trust
+- workspace must be pre-registered;
+- Codex runs with `read-only` thread sandbox;
+- turn policy is `readOnly` with network disabled;
+- DSH remains read-only;
+- proxy and SSH agent environment variables are not inherited by Codex readonly mode;
+- the task cannot intentionally modify the workspace, commit, push, or create a PR.
 
-Manual registrations are authoritative: the trusted operator controls `workspaces.json`, and MCP callers can select IDs but cannot add or replace manual entries. Managed onboarding is confined to configured `project_root` approved roots: candidate paths are canonicalized with `realpath`, must equal or be contained by an approved root (fail closed otherwise), and `bind_project`/`create_project` require exact `BIND`/`CREATE` confirmation. Managed workspaces start read-only; only exact `AUTHORIZE` grants controlled-write permission, persisted first and applied at runtime. Controlled writes also require the configured root to be a clean Git top-level and recorded base; on filesystems with path aliases, canonical real paths are compared so aliases to the same directory are accepted without treating a genuine subdirectory or different directory as the Git top-level.
+This is a process-level policy, not an OS-level confidentiality boundary: a process running as the same OS user may still read files the OS permits.
 
-The human reviewer must inspect every path and hunk in a proposal before supplying exact `APPLY`. A filename mentioned in a natural-language request is not a semantic file allowlist enforced by the code. Supervisor `accept` accepts read-only task output; it is distinct from `apply_controlled_patch` and does not write files.
+## Controlled patch
 
-## Persistence boundary
+Controlled patch remains an explicit review-before-write mechanism.
 
-Two local state files provide restart persistence, both written atomically (write-temporary-then-rename) with mode 0600:
+`allow_write` means only: the workspace may receive a validated `apply_controlled_patch` after exact `APPLY` confirmation. It does not grant Git development authority, network access, commit/push permission, or development-task eligibility.
 
-- `<config>.managed-workspaces.json` — the managed workspace catalog (registrations and controlled-write authorization). Individually invalid records are skipped on load; persist failures roll back the in-memory change.
-- `<config>.controlled-patches.json` — controlled-patch proposals and applied history. Invalid retained records are quarantined without blocking startup; duplicate identity, applied-history contradictions, and other global invariants still fail closed.
+Managed workspaces may receive `allow_write` through `authorize_workspace_write` after exact `AUTHORIZE` confirmation.
 
-These files are not a credential store and not a complete audit log. Active task supervision state (tasks, threads, evidence, review outputs) remains process-local and disappears on restart.
+## Trusted development
 
-## Executor, state, and prompt boundaries
+`run_development_task` is intentionally more privileged. It is designed for a formal repository Task Contract whose implementation is expected to modify files, run project tools, use Git, push the approved work branch and create/update a PR.
 
-Codex's read-only sandbox and DSH's pinned read-only permission are the write boundary during tasks and proposal generation. They are not OS-level read jails: executors running as the same user may read other files allowed by the operating system.
+Development permission is local-only configuration:
 
-Task results can include `review_output`, bounded command/file-change `evidence` (with explicit truncation markers when bounds apply), a real Codex `thread_id`, and `partial_output` from genuine interrupts. These records are review and diagnostic material, not a durable audit log or an additional write authorization mechanism.
+```json
+{
+  "id": "project",
+  "root": "/workspaces/project",
+  "allow_development": true,
+  "development_remote": "origin"
+}
+```
 
-The patch-generation prompt constrains expected output but is not relied upon by itself; code validates the returned patch before application.
+Security properties:
 
-## Not provided
+- only manual workspaces may enable it;
+- `development_remote` is mandatory and trusted local configuration;
+- the MCP caller cannot supply or modify the remote;
+- managed workspaces cannot be upgraded into development workspaces;
+- `authorize_workspace_write` never affects development permission;
+- there is no MCP development-authorization tool.
 
-Bridge has no caller authentication, HTTP or remote service, UI, persistent database, persistent task/thread/evidence supervision history, persistent logs, automatic timeout, automatic acceptance, or restart recovery of active task state. Do not expose the STDIO process through an untrusted wrapper. Do not place credentials or sensitive material in prompts, configuration, or public reports.
+## Immutable task identity
 
-See [SECURITY.md](../SECURITY.md) for the operator-facing security policy and [threat-model.md](threat-model.md) for the compact threat summary.
+A development task fixes:
+
+```text
+workspace_id
+remote
+work_branch
+task_id
+tasks/<task_id>.md
+executor=codex
+```
+
+`continue` and `steer` preserve that identity. Supervisor feedback can refine implementation, but cannot redirect the task to another branch/remote/Task Contract.
+
+## Bootstrap fail-closed rules
+
+The generated bootstrap instruction requires Codex to stop rather than repair unknown repository state:
+
+- unrelated dirty work -> `BLOCKED`;
+- configured remote missing -> `BLOCKED`;
+- local/remote divergence -> `BLOCKED`;
+- Task Contract missing -> `BLOCKED`;
+- repository Preflight failure -> `BLOCKED`.
+
+It explicitly prohibits stash/reset/clean/discard of unrelated work, remote rewrites, rebase/reset as synchronization, force push, and PR merge.
+
+## Outer sandbox assumption
+
+Development Codex maps to:
+
+```text
+thread sandbox = danger-full-access
+turn sandboxPolicy = externalSandbox
+networkAccess = enabled
+approvalPolicy = never
+```
+
+Therefore the **outer development container or OS sandbox is the actual security boundary**. Enabling trusted development directly in a broad host environment grants Codex whatever that host user/container can access.
+
+Recommended deployment topology keeps tunnel/control-plane secrets outside the development sandbox when possible:
+
+```text
+host / control plane
+  tunnel client + tunnel credential
+
+trusted dev container
+  Engineering Bridge
+  Codex
+  workspace
+  Git/Codex development credentials
+```
+
+## Environment forwarding
+
+Readonly Codex receives the minimal base allowlist.
+
+Development additionally receives:
+
+```text
+HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
+http_proxy https_proxy all_proxy no_proxy
+SSH_AUTH_SOCK
+```
+
+Bridge does not default-forward:
+
+```text
+OPENAI_API_KEY
+GH_TOKEN
+GITHUB_TOKEN
+```
+
+This is deliberate defense in depth. It does not make the container secret-free: credentials stored in HOME, CODEX_HOME, `~/.ssh`, `~/.config/gh`, mounted files, agent sockets or other readable locations remain available according to OS permissions.
+
+## Input validation
+
+`task_id` accepts a conservative filename-safe token and is always mapped under `tasks/`.
+
+`work_branch` rejects control/whitespace characters and dangerous Git-ref constructs including `..`, `@{`, backslash, leading `-`, malformed segments and unsupported ref syntax.
+
+These values are passed as task data to Codex, not interpolated into a shell command by Bridge. Executor processes are started with `shell: false` and task instructions travel over app-server stdin.
+
+## Residual risk
+
+Trusted development is intentionally capable of making real repository changes. A malicious or compromised Task Contract, repository instruction file, dependency script, CLI, Git hook, SSH configuration, credential helper or upstream endpoint can influence execution. The outer sandbox and repository governance remain essential controls.
