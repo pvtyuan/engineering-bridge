@@ -33,10 +33,12 @@ function failedTurn(turn: Record<string, unknown>): ExecutorResult {
   }
   return failure("CODEX_EXECUTION_FAILED");
 }
-function environment(host: Readonly<NodeJS.ProcessEnv>, executionMode: ExecutionMode): NodeJS.ProcessEnv {
+function environment(host: Readonly<NodeJS.ProcessEnv>, executionMode: ExecutionMode | undefined): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = {};
   for (const key of ENVIRONMENT_ALLOWLIST) if (host[key]) result[key] = host[key];
-  for (const key of CODEX_TRANSPORT_ENVIRONMENT_ALLOWLIST) if (host[key]) result[key] = host[key];
+  if (executionMode !== undefined) {
+    for (const key of CODEX_TRANSPORT_ENVIRONMENT_ALLOWLIST) if (host[key]) result[key] = host[key];
+  }
   if (executionMode === "development") {
     for (const key of DEVELOPMENT_ENVIRONMENT_ALLOWLIST) if (host[key]) result[key] = host[key];
   }
@@ -72,7 +74,7 @@ export class CodexExecutor implements Executor {
         cwd: this.workspaceRoot,
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
-        env: environment(this.hostEnvironment, executionMode)
+        env: environment(this.hostEnvironment, request.executionMode)
       };
       const resolved = resolveCommand(this.hostEnvironment, "codex", {
         nodeTarget: CODEX_NODE_TARGET, platform: this.platform
