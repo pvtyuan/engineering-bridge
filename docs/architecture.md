@@ -101,7 +101,18 @@ The development mapping means the outer development container/OS sandbox is the 
 
 ## Environment ownership
 
-Readonly Codex receives the minimal historical environment allowlist. Development additionally receives proxy variables and `SSH_AUTH_SOCK`, because Git fetch/push and project dependency access often require them.
+Interactive Codex execution receives the transport environment required for Codex model/control-plane communication:
+
+```text
+HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
+http_proxy https_proxy all_proxy no_proxy
+```
+
+Trusted development additionally receives:
+
+```text
+SSH_AUTH_SOCK
+```
 
 High-value API/token variables such as `OPENAI_API_KEY`, `GH_TOKEN`, and `GITHUB_TOKEN` are not forwarded by default. Codex auth is expected through HOME/CODEX_HOME; Git/gh auth is owned by the trusted outer environment.
 
