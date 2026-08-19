@@ -5,6 +5,10 @@ import { CoreError } from "../core/errors.js";
 
 const REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
 
+function isSafeDevelopmentRemote(value: string): boolean {
+  return REMOTE_NAME.test(value) && !value.includes("..");
+}
+
 export interface WorkspaceRegistration {
   readonly id: string;
   readonly root: string;
@@ -41,7 +45,7 @@ export class RegisteredWorkspaceRegistry {
     this.canonicalize = canonicalize;
     for (const entry of entries) {
       const developmentConfigValid = entry.allow_development === true
-        ? typeof entry.development_remote === "string" && REMOTE_NAME.test(entry.development_remote)
+        ? typeof entry.development_remote === "string" && isSafeDevelopmentRemote(entry.development_remote)
         : entry.development_remote === undefined;
       if (typeof entry.id !== "string" || entry.id.length === 0 ||
           typeof entry.root !== "string" || entry.root.length === 0 ||
