@@ -141,7 +141,7 @@ async function main(): Promise<void> {
       task_id: view.taskId,
       state: view.state,
       executor: view.executor,
-      task_kind: view.taskKind,
+      task_kind: view.taskKind ?? "readonly",
       ...(view.workspaceId === undefined ? {} : { workspace_id: view.workspaceId }),
       ...(view.workBranch === undefined ? {} : { work_branch: view.workBranch }),
       ...(view.taskContract === undefined ? {} : { task_contract: view.taskContract }),
