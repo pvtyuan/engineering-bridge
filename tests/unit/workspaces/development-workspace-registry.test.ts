@@ -56,7 +56,8 @@ test("invalid development configuration fails closed", () => {
   for (const registration of [
     { id: "dev", root: ROOT, allow_development: true },
     { id: "dev", root: ROOT, allow_development: false, development_remote: "origin" },
-    { id: "dev", root: ROOT, allow_development: true, development_remote: "bad remote" }
+    { id: "dev", root: ROOT, allow_development: true, development_remote: "bad remote" },
+    { id: "dev", root: ROOT, allow_development: true, development_remote: "remote..name" }
   ]) {
     assert.throws(
       () => new RegisteredWorkspaceRegistry([registration]),
