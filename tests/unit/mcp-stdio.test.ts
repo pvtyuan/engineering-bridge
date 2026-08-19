@@ -107,7 +107,7 @@ test("run_readonly_task remains asynchronous, defaults to Codex, supports DSH, a
       const view = await waitForTerminal(client, run.body.task_id);
       assert.equal(view.executor, argumentsValue.executor ?? "codex");
       assert.equal("thread_id" in view, false);
-      assert.equal("task_kind" in view, false);
+      assert.equal(view.task_kind, "readonly");
       assert.deepEqual(view.error, {
         code: "UNKNOWN_WORKSPACE",
         message: "The requested workspace is not registered."
@@ -204,7 +204,8 @@ test("startup rejects invalid trusted-development configuration", async () => {
   for (const registration of [
     { id: "dev", root: "/tmp/dev", allow_development: true },
     { id: "dev", root: "/tmp/dev", allow_development: false, development_remote: "origin" },
-    { id: "dev", root: "/tmp/dev", allow_development: true, development_remote: "bad remote" }
+    { id: "dev", root: "/tmp/dev", allow_development: true, development_remote: "bad remote" },
+    { id: "dev", root: "/tmp/dev", allow_development: true, development_remote: "remote..name" }
   ]) {
     const configPath = join(mkdtempSync(join(tmpdir(), "engineering-bridge-invalid-dev-")), "workspaces.json");
     writeFileSync(configPath, `${JSON.stringify([registration], null, 2)}\n`);
