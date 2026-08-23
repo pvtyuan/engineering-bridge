@@ -190,6 +190,27 @@ Codex 必须能从 Bridge 进程的 `PATH` 找到；development 模式还要求�
 
 `continue` 和 `steer` 都会保留相同 task/branch/remote identity。Codex 原生 thread id 在存在时继续复用；Bridge 不维护第二份 transcript 事实源。
 
+Completed development turns also preserve the unchanged Codex final message as `review_output` and expose a separate Completion Receipt state:
+
+```json
+{
+  "completion_receipt": {
+    "status": "valid",
+    "receipt": {
+      "protocol_version": 1,
+      "task_id": "DEV-001",
+      "work_branch": "feature/example",
+      "outcome": "success",
+      "summary": "Implemented the approved change.",
+      "validations": [],
+      "blockers": []
+    }
+  }
+}
+```
+
+Receipts use the `<engineering_bridge_receipt>` delimiter block and are classified as `valid`, `missing`, or `invalid`. A missing or invalid receipt does not turn a completed Codex turn into a failed task. Continuing a development task clears the previous round's current receipt until the next completed turn replaces it.
+
 ## 文档
 
 - [工具参考](docs/tools.md)

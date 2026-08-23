@@ -149,6 +149,7 @@ async function main(): Promise<void> {
       ready: view.ready,
       ...(view.output === undefined ? {} : { output: view.output }),
       ...(view.review_output === undefined ? {} : { review_output: view.review_output }),
+      ...(view.completion_receipt === undefined ? {} : { completion_receipt: view.completion_receipt }),
       ...(view.partial_output === undefined ? {} : { partial_output: view.partial_output }),
       evidence: view.evidence,
       ...(view.error === undefined ? {} : { error: view.error })

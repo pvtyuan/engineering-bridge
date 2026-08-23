@@ -6,6 +6,10 @@ import { CoreError } from "../core/errors.js";
 import type { Executor, ExecutorEvidence } from "../executors/executor.js";
 import { RegisteredWorkspaceRegistry } from "../workspaces/registered-workspace-registry.js";
 import {
+  parseCompletionReceipt,
+  type CompletionReceiptParseResult
+} from "./development-completion-receipt.js";
+import {
   buildDevelopmentContinuationInstruction,
   buildDevelopmentStartInstruction,
   buildDevelopmentSteerInstruction,
@@ -72,6 +76,7 @@ export interface ControlledTaskView {
   readonly ready?: boolean;
   readonly output?: string | undefined;
   readonly review_output?: string | undefined;
+  readonly completion_receipt?: CompletionReceiptParseResult | undefined;
   readonly partial_output?: string | undefined;
   readonly evidence?: readonly ExecutorEvidence[];
   readonly error?: SerializedError | undefined;
@@ -218,6 +223,7 @@ export class RegisteredWorkspaceTaskService {
       executor: record.request.executor,
       ...developmentIdentity,
       evidence: record.evidence,
+      ...(record.completionReceipt === undefined ? {} : { completion_receipt: record.completionReceipt }),
       ...(record.threadId === undefined ? {} : { threadId: record.threadId })
     };
     if (record.state === "queued" || record.state === "running") return { ...base, ready: false };
@@ -251,6 +257,10 @@ export class RegisteredWorkspaceTaskService {
       } else {
         record.request = { ...record.request, instruction };
       }
+      record.completionReceipt = undefined;
+      record.output = undefined;
+      record.partialOutput = undefined;
+      record.error = undefined;
       record.state = "queued";
       queueMicrotask(() => void this.executeInteractive(taskId));
     } else if (action === "steer") {
@@ -276,6 +286,7 @@ export class RegisteredWorkspaceTaskService {
     executor?: Executor | undefined;
     threadId?: string | undefined;
     output?: string | undefined;
+    completionReceipt?: CompletionReceiptParseResult | undefined;
     partialOutput?: string | undefined;
     error?: SerializedError | undefined;
   }>();
@@ -314,6 +325,12 @@ export class RegisteredWorkspaceTaskService {
       } else {
         record.state = "waiting_for_supervisor_review";
         record.output = result.output;
+        record.completionReceipt = record.request.kind === "development"
+          ? parseCompletionReceipt(result.output, {
+            taskId: record.request.task_id,
+            workBranch: record.request.work_branch
+          })
+          : undefined;
       }
       if (record.state === "failed") this.recordInteractiveTerminalTask(taskId);
     } catch (error) {

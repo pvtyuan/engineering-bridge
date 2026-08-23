@@ -52,6 +52,13 @@ test("bootstrap instruction fixes exact identity and fail-closed Git behavior", 
     "Fast-forward only when safe",
     "Read AGENTS.md",
     "Required Reference",
+    "engineering_bridge_receipt",
+    "protocol_version",
+    "head_commit",
+    "pr_url",
+    "report_path",
+    "validations",
+    "blockers",
     "Never force push",
     "Never merge the PR"
   ]) {
@@ -70,4 +77,6 @@ test("continuation keeps immutable identity and carries only supervisor feedback
   assert.equal(instruction.includes("Task contract: tasks/DEV-002.md"), true);
   assert.equal(instruction.includes("Fix the CI failure."), true);
   assert.equal(instruction.includes("Do not change the task, branch, remote"), true);
+  assert.equal(instruction.includes("engineering_bridge_receipt"), true);
+  assert.equal(instruction.includes("outcome (success or blocked)"), true);
 });

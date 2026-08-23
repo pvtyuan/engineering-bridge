@@ -1,5 +1,11 @@
 # Release Notes
 
+## Unreleased — Supervised Completion Receipt
+
+- Trusted development instructions require a protocol-v1 Completion Receipt after the human-readable final summary.
+- `task_result` exposes the receipt classification separately from the unchanged `review_output`; missing or invalid receipts do not fail a completed turn.
+- Continuing a development task preserves its identity and clears the previous round's current receipt before the next turn.
+
 ## 2.0.0 — Trusted Development
 
 V2 introduces an explicitly authorized formal-development path while preserving the read-only and controlled-patch security models.

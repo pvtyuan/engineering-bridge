@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,12 +13,13 @@ interface ToolResult {
   content: Array<{ type?: string; text?: string } | undefined>;
 }
 
-function clientFor(configPath: string): { client: Client; transport: StdioClientTransport } {
+function clientFor(configPath: string, env?: Record<string, string>): { client: Client; transport: StdioClientTransport } {
   const client = new Client({ name: "test-client", version: "1.0.0" });
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [join(process.cwd(), "dist/src/mcp-stdio.js"), configPath],
     cwd: process.cwd(),
+    ...(env === undefined ? {} : { env }),
     stderr: "pipe"
   });
   return { client, transport };
@@ -121,6 +122,86 @@ test("run_readonly_task remains asynchronous, defaults to Codex, supports DSH, a
     });
     assert.equal(unknown.isError, true);
     assert.equal("task_id" in unknown.body, false);
+  } finally {
+    await client.close();
+  }
+});
+
+test("development task_result exposes review_output and the completion receipt", async () => {
+  const root = mkdtempSync(join(tmpdir(), "engineering-bridge-development-receipt-root-"));
+  const configDir = mkdtempSync(join(tmpdir(), "engineering-bridge-development-receipt-config-"));
+  const fakeBin = mkdtempSync(join(tmpdir(), "engineering-bridge-development-receipt-bin-"));
+  const configPath = join(configDir, "workspaces.json");
+  const taskId = "DEV-MCP-001";
+  const workBranch = "feature/mcp-receipt";
+  const reviewOutput = [
+    "Codex human-readable summary.",
+    "",
+    "<engineering_bridge_receipt>",
+    JSON.stringify({
+      protocol_version: 1,
+      task_id: taskId,
+      work_branch: workBranch,
+      outcome: "success",
+      summary: "Completed the MCP receipt round.",
+      validations: [{ name: "focused test", status: "passed" }],
+      blockers: []
+    }),
+    "</engineering_bridge_receipt>"
+  ].join("\n");
+  const fakeCodex = join(fakeBin, "codex");
+  writeFileSync(fakeCodex, `#!/usr/bin/env node
+import { createInterface } from "node:readline";
+
+const output = ${JSON.stringify(reviewOutput)};
+const input = createInterface({ input: process.stdin });
+input.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.id === undefined) return;
+  let result = {};
+  if (message.method === "thread/start") result = { thread: { id: "thread-mcp-receipt" } };
+  if (message.method === "turn/start") result = { turn: { id: "turn-mcp-receipt" } };
+  process.stdout.write(JSON.stringify({ id: message.id, result }) + "\\n");
+  if (message.method === "turn/start") {
+    process.stdout.write(JSON.stringify({ method: "item/completed", params: { item: { id: "message-mcp-receipt", type: "agentMessage", text: output } } }) + "\\n");
+    process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: "thread-mcp-receipt", turn: { id: "turn-mcp-receipt", status: "completed" } } }) + "\\n");
+  }
+});
+`);
+  chmodSync(fakeCodex, 0o755);
+  writeFileSync(configPath, `${JSON.stringify([
+    { id: "dev", root, allow_development: true, development_remote: "origin" }
+  ], null, 2)}\n`);
+  const { client, transport } = clientFor(configPath, {
+    PATH: `${fakeBin}:${process.env.PATH ?? ""}`
+  });
+
+  try {
+    await client.connect(transport);
+    const run = await call(client, "run_development_task", {
+      workspace_id: "dev",
+      work_branch: workBranch,
+      task_id: taskId
+    });
+    assert.equal(run.isError, false);
+    assert.equal(typeof run.body.task_id, "string");
+    if (typeof run.body.task_id !== "string") return;
+
+    const view = await waitForTerminal(client, run.body.task_id);
+    assert.equal(view.state, "waiting_for_supervisor_review");
+    assert.equal(view.review_output, reviewOutput);
+    assert.deepEqual(view.completion_receipt, {
+      status: "valid",
+      receipt: {
+        protocol_version: 1,
+        task_id: taskId,
+        work_branch: workBranch,
+        outcome: "success",
+        summary: "Completed the MCP receipt round.",
+        validations: [{ name: "focused test", status: "passed" }],
+        blockers: []
+      }
+    });
   } finally {
     await client.close();
   }

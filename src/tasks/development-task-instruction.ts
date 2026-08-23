@@ -1,3 +1,8 @@
+import {
+  COMPLETION_RECEIPT_CLOSE,
+  COMPLETION_RECEIPT_OPEN
+} from "./development-completion-receipt.js";
+
 export interface DevelopmentTaskIdentity {
   readonly remote: string;
   readonly workBranch: string;
@@ -30,6 +35,14 @@ export function isSafeWorkBranch(value: string): boolean {
   );
 }
 
+const COMPLETION_RECEIPT_REQUIREMENT = `When a development turn completes, finish the human-readable summary with exactly one machine-readable Completion Receipt block. Use protocol version 1 and valid JSON between these stable delimiters:
+
+${COMPLETION_RECEIPT_OPEN}
+{"protocol_version":1,"task_id":"<trusted task id>","work_branch":"<trusted work branch>","outcome":"success","summary":"<summary>","head_commit":"<current work-branch HEAD when available>","pr_url":"<PR URL when available>","report_path":"<report path when applicable>","validations":[{"name":"<check>","status":"<status>"}],"blockers":[]}
+${COMPLETION_RECEIPT_CLOSE}
+
+The receipt must include protocol_version, task_id, work_branch, outcome (success or blocked), summary, validations, and blockers. Use the exact trusted task id and work branch. Include head_commit for the current work-branch HEAD of the latest delivery round when available; include pr_url and report_path only when available or applicable. For a blocked turn, use outcome blocked and list every blocker. Keep the full human-readable summary before the receipt and do not put Markdown fences around the receipt JSON.`;
+
 export function buildDevelopmentStartInstruction(identity: DevelopmentTaskIdentity): string {
   const taskPath = taskContractPath(identity.taskId);
   return `You are executing one approved formal development task.
@@ -53,7 +66,9 @@ Perform Workspace Bootstrap before implementation:
 
 After Bootstrap and Preflight, execute the repository's formal development contract completely. Follow AGENTS.md and the Task Contract for implementation, tests, documentation/reporting, commit, push, PR creation/update, and STOP conditions.
 
-Never change the task, work branch, configured remote, target branch, credentials, or protected-branch policy. Never force push. Never merge the PR.`;
+Never change the task, work branch, configured remote, target branch, credentials, or protected-branch policy. Never force push. Never merge the PR.
+
+${COMPLETION_RECEIPT_REQUIREMENT}`;
 }
 
 export function buildDevelopmentContinuationInstruction(
@@ -73,7 +88,9 @@ Before continuing, verify you are still on the exact work branch and that the Ta
 Supervisor feedback/instruction:
 ${supervisorInstruction}
 
-Continue according to AGENTS.md and the Task Contract. If implementation evidence changes, update the report as required, then commit and push fixes to the same branch/PR.`;
+Continue according to AGENTS.md and the Task Contract. If implementation evidence changes, update the report as required, then commit and push fixes to the same branch/PR.
+
+${COMPLETION_RECEIPT_REQUIREMENT}`;
 }
 
 export function buildDevelopmentSteerInstruction(
