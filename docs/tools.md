@@ -53,6 +53,16 @@ With only `task_id`, the tool preserves its legacy immediate-return behavior. Wh
 
 Returns task state, executor, readiness, evidence, output/review output or safe error. Development tasks additionally return `task_kind`, `workspace_id`, `work_branch`, and `task_contract`.
 
+## Supervised development lifecycle
+
+Codex completing a turn is not Task acceptance. A completed development turn enters `waiting_for_supervisor_review`, where the Supervisor reviews the unchanged `review_output`, current-round Completion Receipt, bounded `live_output`, and evidence. `control_task(action="accept")` then completes that same runtime task; `control_task(action="continue")` starts another round on the same runtime task, workspace, configured remote, work branch, Task Contract, logical Task, and reusable Codex thread when available.
+
+Each continuation clears the previous current receipt, live snapshot, and evidence before queueing the next round. The next round supplies the current snapshots and newest receipt. A Task may make multiple commits on its one work branch and continuation rounds use the same PR; the accepted branch HEAD is the delivery HEAD, with no force-push or automatic merge.
+
+The ready wait is Promise/event based and bounded to 20 seconds per MCP request. `waiting_for_supervisor_review`, `failed`, and `completed` are ready states. A timeout returns the latest non-ready snapshot with `wait_timeout: true` and does not mutate or interrupt the task. `include_evidence: false` suppresses only the response's evidence field, while `live_output` remains the latest bounded non-empty `agentMessage` snapshot. It is not transcript persistence, token streaming, or server push.
+
+The Active-Turn Supervisor limitation remains: Engineering Bridge can serve a bounded MCP wait while the assistant turn is active, but does not promise to wake a ChatGPT conversation after the assistant turn ends. Runtime task and waiter state are in-memory and may be lost on process restart. A Completion Receipt is Bridge-validated review metadata for the trusted task id and work branch, not an authorization mechanism.
+
 ## `control_task`
 
 Input:

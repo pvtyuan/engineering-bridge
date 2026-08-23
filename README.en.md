@@ -118,6 +118,16 @@ apply_controlled_patch
 
 Interactive tasks can expose `live_output`, the latest bounded non-empty Codex `agentMessage` snapshot. It is not a transcript or token stream, and `continue` clears it before the next execution round. `review_output` remains the authoritative completed-turn output.
 
+## Supervised development lifecycle
+
+Codex completing a turn does **not** mean the Task is complete. A successful turn first enters `waiting_for_supervisor_review`, the review gate where the Supervisor inspects the unchanged `review_output`, the current Completion Receipt, bounded `live_output`, and evidence. Only `control_task(action="accept")` moves that same runtime task to `completed`.
+
+`control_task(action="continue")` starts another delivery round for the same Task. The runtime task id, workspace, configured remote, work branch, Task Contract, logical Task identity, and reusable Codex thread remain fixed. The current receipt, live snapshot, and evidence are cleared before the next round; the next round's snapshots and newest receipt replace them. One Task may produce multiple commits on one branch, all continuation rounds use the same PR, force-push is forbidden, and the branch HEAD at Supervisor accept is the accepted delivery HEAD.
+
+`task_result({ wait_for: "ready" })` waits only within one bounded request (20 seconds maximum). A timeout returns the latest non-ready snapshot with `wait_timeout: true` without changing task state or interrupting Codex. `include_evidence: false` omits only evidence for that response; receipt, identity, review output, and `live_output` remain independent. `live_output` is only the latest bounded Codex `agentMessage` snapshot—not a transcript, token stream, or server push.
+
+The v2.1.0 Active-Turn Supervisor limitation is intentional: while the assistant turn is active, MCP can await a ready transition, but Engineering Bridge does not promise to wake a ChatGPT conversation after that assistant turn has already ended. Runtime task and waiter state are in-memory and may be lost on process restart. Completion Receipts are review metadata parsed and identity-validated by the Bridge task-service layer; they do not grant executor permissions.
+
 ## Build and test
 
 Requires Node.js 22+.

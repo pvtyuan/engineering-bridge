@@ -275,7 +275,9 @@ export class RegisteredWorkspaceTaskService {
     };
     if (record.state === "queued" || record.state === "running") return { ...base, ready: false };
     if (record.state === "waiting_for_supervisor_review") return { ...base, ready: true, review_output: record.output };
-    if (record.state === "completed") return { ...base, ready: true, output: record.output };
+    if (record.state === "completed") {
+      return { ...base, ready: true, output: record.output, review_output: record.output };
+    }
     return {
       ...base,
       ready: true,
@@ -308,6 +310,7 @@ export class RegisteredWorkspaceTaskService {
       record.output = undefined;
       record.partialOutput = undefined;
       record.liveOutput = undefined;
+      record.evidence = [];
       record.error = undefined;
       record.state = "queued";
       queueMicrotask(() => void this.executeInteractive(taskId));

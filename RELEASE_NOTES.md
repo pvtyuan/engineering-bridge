@@ -1,5 +1,15 @@
 # Release Notes
 
+## Unreleased — Supervised Lifecycle Integration
+
+- Integrated the `run_development_task -> task_result(wait_for="ready") -> waiting_for_supervisor_review -> continue/accept` lifecycle on one runtime Task.
+- `Codex completed` remains distinct from Task acceptance; Supervisor `accept` preserves the latest review output and current Completion Receipt.
+- Continuation rounds keep the same workspace, configured remote, work branch, Task Contract, logical Task, PR, and reusable Codex thread when available; multiple commits are allowed and force-push/automatic merge remain prohibited.
+- Each continuation starts a fresh current-round receipt, live-output snapshot, and evidence view. `task_result` waits remain bounded and non-mutating on timeout, while `include_evidence` remains request-local.
+- `live_output` remains a bounded latest-message snapshot rather than transcript storage, token streaming, or server push.
+- v2.1.0 still does not promise waking a ChatGPT conversation after its assistant turn ends, and in-memory task/waiter state may be lost on process restart.
+- This is release preparation only; v2.1.0 is not claimed released and no external MCP E2E, canonical snapshot, version pointer update, or PR merge is performed here.
+
 ## Unreleased — Awaitable task_result and Live Progress
 
 - `task_result` accepts bounded `wait_for: "ready"` waits with timeout snapshots while preserving legacy immediate calls.

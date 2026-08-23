@@ -215,6 +215,16 @@ Completed development turns also preserve the unchanged Codex final message as `
 
 Receipts use the `<engineering_bridge_receipt>` delimiter block and are classified as `valid`, `missing`, or `invalid`. A missing or invalid receipt does not turn a completed Codex turn into a failed task. Continuing a development task clears the previous round's current receipt until the next completed turn replaces it.
 
+### 监督式正式任务生命周期
+
+Codex 完成一个 turn **不等于 Task 已完成**。成功轮次先进入 `waiting_for_supervisor_review`，这是 Supervisor 检查 `review_output`、Completion Receipt、`live_output` 和 evidence 的 review gate；只有 `control_task(action="accept")` 才会把同一个 runtime task 置为 `completed`。
+
+`control_task(action="continue")` 开始同一 Task 的新 delivery round：runtime task id、workspace、配置的 remote、work branch、Task Contract、逻辑 Task 身份和可复用的 Codex thread 保持不变。上一轮的 current receipt、live snapshot 和 evidence 会先清除，新一轮产生的新快照和最新 receipt 会替换它们。一个 Task 可以在同一 branch 上产生多个 commit；所有 continuation round 使用同一个 PR，不 force-push，Supervisor accept 时的 branch HEAD 是 accepted delivery HEAD。
+
+`task_result(wait_for="ready")` 只在一次调用内等待 bounded 的 20 秒；超时返回最新的 non-ready snapshot 和 `wait_timeout: true`，不会修改 Task 或中断 Codex。`include_evidence: false` 只省略该次响应的 evidence，不影响 receipt、identity、review output 或 `live_output`。`live_output` 始终是最新的有界 Codex `agentMessage` 快照，不是 transcript、token streaming 或 server push。
+
+v2.1.0 的 Active-Turn Supervisor 只保证当前 assistant turn 仍在进行时的 MCP 等待；assistant turn 已结束后，Engineering Bridge 不承诺能够唤醒 ChatGPT 对话。runtime task 和 waiter 状态仍保存在内存中，进程重启后可能丢失。Completion Receipt 是在 Bridge task-service 层按可信 `task_id` 和 `work_branch` 校验的 review metadata，不是 Codex transport 的权限授予。
+
 ## 文档
 
 - [工具参考](docs/tools.md)

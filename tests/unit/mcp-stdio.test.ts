@@ -164,6 +164,7 @@ input.on("line", (line) => {
   process.stdout.write(JSON.stringify({ id: message.id, result }) + "\\n");
   if (message.method === "turn/start") {
     process.stdout.write(JSON.stringify({ method: "item/completed", params: { item: { id: "message-mcp-receipt", type: "agentMessage", text: output } } }) + "\\n");
+    process.stdout.write(JSON.stringify({ method: "item/completed", params: { item: { id: "command-mcp-receipt", type: "commandExecution", status: "completed", command: "npm test" } } }) + "\\n");
     process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: "thread-mcp-receipt", turn: { id: "turn-mcp-receipt", status: "completed" } } }) + "\\n");
   }
 });
@@ -191,7 +192,12 @@ input.on("line", (line) => {
     assert.equal(view.state, "waiting_for_supervisor_review");
     assert.equal(view.review_output, reviewOutput);
     assert.equal(view.live_output, reviewOutput);
-    assert.deepEqual(view.evidence, []);
+    assert.deepEqual(view.evidence, [{
+      id: "command-mcp-receipt",
+      type: "commandExecution",
+      status: "completed",
+      command: "npm test"
+    }]);
     assert.deepEqual(view.completion_receipt, {
       status: "valid",
       receipt: {
@@ -215,6 +221,19 @@ input.on("line", (line) => {
     assert.equal(readyWithoutEvidence.body.ready, true);
     assert.equal("evidence" in readyWithoutEvidence.body, false);
     assert.equal(readyWithoutEvidence.body.live_output, reviewOutput);
+
+    const accepted = await call(client, "control_task", {
+      task_id: run.body.task_id,
+      action: "accept"
+    });
+    assert.deepEqual(accepted.body, { task_id: run.body.task_id, state: "completed" });
+
+    const completed = await call(client, "task_result", { task_id: run.body.task_id });
+    assert.equal(completed.body.state, "completed");
+    assert.equal(completed.body.output, reviewOutput);
+    assert.equal(completed.body.review_output, reviewOutput);
+    assert.deepEqual(completed.body.completion_receipt, view.completion_receipt);
+    assert.deepEqual(completed.body.evidence, view.evidence);
   } finally {
     await client.close();
   }
