@@ -39,8 +39,17 @@ The tool fixes workspace/remote/branch/task identity for the task lifetime. It m
 Input:
 
 ```json
-{ "task_id": "..." }
+{
+  "task_id": "...",
+  "wait_for": "ready",
+  "timeout_ms": 20000,
+  "include_evidence": false
+}
 ```
+
+With only `task_id`, the tool preserves its legacy immediate-return behavior. When `wait_for` is `"ready"`, it waits for a ready state (`waiting_for_supervisor_review`, `failed`, or `completed`) and uses a maximum 20-second timeout by default. A timeout returns the latest snapshot with `ready: false` and `wait_timeout: true`; it does not change task state or interrupt execution.
+
+`include_evidence` defaults to `true`. Set it to `false` to omit only `evidence`; identity, errors, review output, and `live_output` remain available. While an interactive task is queued or running, `live_output` contains the latest bounded non-empty Codex agent message, not a transcript.
 
 Returns task state, executor, readiness, evidence, output/review output or safe error. Development tasks additionally return `task_kind`, `workspace_id`, `work_branch`, and `task_contract`.
 

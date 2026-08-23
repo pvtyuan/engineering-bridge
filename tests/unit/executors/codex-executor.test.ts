@@ -254,6 +254,32 @@ test("an interrupted turn keeps the last completed agent text as real partial ou
   });
 });
 
+test("forwards only the latest bounded non-empty agent messages as progress", async () => {
+  const invocations: Invocation[] = [];
+  const outputs: string[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD, fakeStarter({ appServerOutput: "", autoComplete: false }, invocations), {});
+  const pending = executor.execute({
+    taskId: TASK_ID,
+    instruction: "x",
+    onOutput: (output) => { outputs.push(output); }
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const invocation = invocations[0];
+  assert.ok(invocation);
+
+  invocation.send({ method: "item/started", params: { item: { id: "message-1", type: "agentMessage", text: "first" } } });
+  invocation.send({ method: "item/completed", params: { item: { id: "message-1", type: "agentMessage", text: "second" } } });
+  invocation.send({ method: "item/completed", params: { item: { id: "message-1", type: "agentMessage", text: "" } } });
+  const longText = "t".repeat(20_000);
+  invocation.send({ method: "item/completed", params: { item: { id: "message-1", type: "agentMessage", text: longText } } });
+  invocation.send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+  const result = await pending;
+  assert.deepEqual(outputs, ["first", "second", `${"t".repeat(16_372)}\n[truncated]`]);
+  assert.equal(result.kind, "completed");
+  if (result.kind === "completed") assert.equal(result.output, longText);
+});
+
 test("marks oversized evidence strings with a visible truncation marker inside the bound", async () => {
   const invocations: Invocation[] = [];
   const executor = new CodexExecutor(TRUSTED_CWD, fakeStarter({ appServerOutput: "", autoComplete: false }, invocations), {});

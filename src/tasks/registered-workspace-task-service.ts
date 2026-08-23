@@ -63,6 +63,7 @@ export type CompletedOutputTransform = (output: string) => string;
 
 export type RegisteredWorkspaceTaskState = "queued" | "running" | "completed" | "failed";
 export type ControlledTaskState = RegisteredWorkspaceTaskState | "waiting_for_supervisor_review";
+export const MAX_TASK_RESULT_WAIT_MS = 20_000;
 
 export interface ControlledTaskView {
   readonly taskId: Id;
@@ -78,6 +79,7 @@ export interface ControlledTaskView {
   readonly review_output?: string | undefined;
   readonly completion_receipt?: CompletionReceiptParseResult | undefined;
   readonly partial_output?: string | undefined;
+  readonly live_output?: string | undefined;
   readonly evidence?: readonly ExecutorEvidence[];
   readonly error?: SerializedError | undefined;
 }
@@ -87,7 +89,15 @@ type TaskRecord =
   | { state: "completed" | "failed"; executor: ExecutorName; result: RegisteredWorkspaceTaskResult };
 
 const MAX_TERMINAL_TASK_HISTORY = 100;
+const MAX_LIVE_OUTPUT_TEXT = 16_384;
+const TRUNCATION_MARKER = "[truncated]";
 export type TerminalTaskHandler = (result: RegisteredWorkspaceTaskResult) => void | Promise<void>;
+
+interface ReadyWaiter {
+  readonly taskId: Id;
+  readonly resolve: (view: ControlledTaskView | undefined) => void;
+  timer?: ReturnType<typeof setTimeout> | undefined;
+}
 
 function interruptedError(executor: ExecutorName): SerializedError {
   return serializeError(new CoreError(executor === "dsh" ? "DSH_EXECUTION_FAILED" : "CODEX_EXECUTION_FAILED"));
@@ -98,9 +108,16 @@ function interruptedTaskResult(taskId: Id, executor: ExecutorName, partialOutput
   return { id: taskId, state: "failed", error: interruptedError(executor), partial_output: partialOutput };
 }
 
+function boundedLiveOutput(value: string): string {
+  if (value.length <= MAX_LIVE_OUTPUT_TEXT) return value;
+  const retained = MAX_LIVE_OUTPUT_TEXT - TRUNCATION_MARKER.length - 1;
+  return `${value.slice(0, retained)}\n${TRUNCATION_MARKER}`;
+}
+
 export class RegisteredWorkspaceTaskService {
   private readonly tasks = new Map<Id, TaskRecord>();
   private readonly pinnedTaskIds = new Set<Id>();
+  private readonly readyWaiters = new Map<Id, Set<ReadyWaiter>>();
   private legacyTerminalTaskIds: Id[] = [];
 
   constructor(
@@ -136,6 +153,7 @@ export class RegisteredWorkspaceTaskService {
     const result: RegisteredWorkspaceTaskResult = { id: taskId, state: "completed", output };
     this.tasks.set(taskId, { state: "completed", executor, result });
     this.legacyTerminalTaskIds.push(taskId);
+    this.resolveReadyWaiters(taskId);
     if (pinned) this.pinnedTaskIds.add(taskId);
     this.trimLegacyTerminalTasks();
   }
@@ -150,6 +168,34 @@ export class RegisteredWorkspaceTaskService {
     if (!isId(taskId)) return undefined;
     const task = this.tasks.get(taskId);
     return task?.state === "completed" || task?.state === "failed" ? task.result : undefined;
+  }
+
+  waitForReady(taskId: unknown, timeoutMs = MAX_TASK_RESULT_WAIT_MS): Promise<ControlledTaskView | undefined> {
+    if (!isId(taskId)) return Promise.resolve(undefined);
+    const current = this.taskView(taskId);
+    if (current === undefined || current.ready === true) return Promise.resolve(current);
+
+    const boundedTimeout = Number.isFinite(timeoutMs)
+      ? Math.min(Math.max(timeoutMs, 0), MAX_TASK_RESULT_WAIT_MS)
+      : MAX_TASK_RESULT_WAIT_MS;
+    return new Promise<ControlledTaskView | undefined>((resolve) => {
+      const waiter: ReadyWaiter = { taskId, resolve };
+      let waiters = this.readyWaiters.get(taskId);
+      if (waiters === undefined) {
+        waiters = new Set<ReadyWaiter>();
+        this.readyWaiters.set(taskId, waiters);
+      }
+      waiters.add(waiter);
+      waiter.timer = setTimeout(() => {
+        this.finishReadyWaiter(waiter, this.taskView(taskId));
+      }, boundedTimeout);
+
+      // State transitions are synchronous, but re-check after registration so
+      // the waiter remains correct even if this method is changed to acquire
+      // state through another synchronous seam in the future.
+      const latest = this.taskView(taskId);
+      if (latest === undefined || latest.ready === true) this.finishReadyWaiter(waiter, latest);
+    });
   }
 
   startTask(request: RegisteredWorkspaceTaskRequest): { taskId: Id } {
@@ -224,7 +270,8 @@ export class RegisteredWorkspaceTaskService {
       ...developmentIdentity,
       evidence: record.evidence,
       ...(record.completionReceipt === undefined ? {} : { completion_receipt: record.completionReceipt }),
-      ...(record.threadId === undefined ? {} : { threadId: record.threadId })
+      ...(record.threadId === undefined ? {} : { threadId: record.threadId }),
+      ...(record.liveOutput === undefined ? {} : { live_output: record.liveOutput })
     };
     if (record.state === "queued" || record.state === "running") return { ...base, ready: false };
     if (record.state === "waiting_for_supervisor_review") return { ...base, ready: true, review_output: record.output };
@@ -260,6 +307,7 @@ export class RegisteredWorkspaceTaskService {
       record.completionReceipt = undefined;
       record.output = undefined;
       record.partialOutput = undefined;
+      record.liveOutput = undefined;
       record.error = undefined;
       record.state = "queued";
       queueMicrotask(() => void this.executeInteractive(taskId));
@@ -288,6 +336,7 @@ export class RegisteredWorkspaceTaskService {
     output?: string | undefined;
     completionReceipt?: CompletionReceiptParseResult | undefined;
     partialOutput?: string | undefined;
+    liveOutput?: string | undefined;
     error?: SerializedError | undefined;
   }>();
   private interactiveTerminalTaskIds: Id[] = [];
@@ -309,7 +358,10 @@ export class RegisteredWorkspaceTaskService {
           ? { executionMode: "development" as const }
           : { executionMode: "readonly" as const, sandbox: "read-only" as const }),
         threadId: record.threadId,
-        onEvidence: (items) => { record.evidence = items; }
+        onEvidence: (items) => { record.evidence = items; },
+        onOutput: (output) => {
+          if (output.trim().length > 0) record.liveOutput = boundedLiveOutput(output);
+        }
       });
       record.executor = undefined;
       record.threadId = result.threadId ?? record.threadId;
@@ -332,11 +384,13 @@ export class RegisteredWorkspaceTaskService {
           })
           : undefined;
       }
+      this.resolveReadyWaiters(taskId);
       if (record.state === "failed") this.recordInteractiveTerminalTask(taskId);
     } catch (error) {
       record.executor = undefined;
       record.state = "failed";
       record.error = serializeError(error);
+      this.resolveReadyWaiters(taskId);
       this.recordInteractiveTerminalTask(taskId);
     }
   }
@@ -377,7 +431,28 @@ export class RegisteredWorkspaceTaskService {
     const executor = this.tasks.get(taskId)?.executor ?? "codex";
     this.tasks.set(taskId, { state: result.state, executor, result });
     this.legacyTerminalTaskIds.push(taskId);
+    this.resolveReadyWaiters(taskId);
     this.trimLegacyTerminalTasks();
+  }
+
+  private finishReadyWaiter(waiter: ReadyWaiter, view: ControlledTaskView | undefined): void {
+    const waiters = this.readyWaiters.get(waiter.taskId);
+    if (waiters === undefined || !waiters.delete(waiter)) return;
+    if (waiters.size === 0) this.readyWaiters.delete(waiter.taskId);
+    if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+    waiter.resolve(view);
+  }
+
+  private resolveReadyWaiters(taskId: Id): void {
+    const view = this.taskView(taskId);
+    if (view?.ready !== true) return;
+    const waiters = this.readyWaiters.get(taskId);
+    if (waiters === undefined) return;
+    this.readyWaiters.delete(taskId);
+    for (const waiter of waiters) {
+      if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+      waiter.resolve(view);
+    }
   }
 
   private recordInteractiveTerminalTask(taskId: Id): void {

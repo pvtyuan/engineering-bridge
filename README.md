@@ -190,6 +190,10 @@ Codex 必须能从 Bridge 进程的 `PATH` 找到；development 模式还要求�
 
 `continue` 和 `steer` 都会保留相同 task/branch/remote identity。Codex 原生 thread id 在存在时继续复用；Bridge 不维护第二份 transcript 事实源。
 
+`task_result` 默认立即返回。需要在一次调用中等待任务可 review 时，可传 `wait_for: "ready"`，并用 `timeout_ms` 指定不超过 20 秒的上限；省略 `timeout_ms` 时使用 20 秒。超时返回最新快照并带有 `wait_timeout: true`，不会改变任务状态或中断 Codex。`include_evidence` 默认是 `true`，设为 `false` 只会省略 `evidence`。
+
+执行中的交互任务还可返回 `live_output`，它是最新一条有界的 Codex `agentMessage` 快照，不是 transcript 或 token streaming。`continue` 开始新一轮时会清除上一轮的 `live_output`；完成后的 `review_output` 仍是最终人工 review 的权威文本。
+
 Completed development turns also preserve the unchanged Codex final message as `review_output` and expose a separate Completion Receipt state:
 
 ```json

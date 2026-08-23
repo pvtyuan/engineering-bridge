@@ -151,7 +151,10 @@ export class CodexExecutor implements Executor {
         if ((message.method === "item/started" || message.method === "item/completed") && item) {
           if (item.type === "agentMessage") {
             if (message.method === "item/completed" && typeof item.text !== "string") { finish(failure("CODEX_PROTOCOL_ERROR")); return; }
-            if (typeof item.text === "string") output = item.text;
+            if (typeof item.text === "string") {
+              output = item.text;
+              if (item.text.trim().length > 0) request.onOutput?.(bounded(item.text));
+            }
           }
           const id = typeof item.id === "string" ? item.id : undefined;
           if (id && (item.type === "commandExecution" || item.type === "fileChange")) {

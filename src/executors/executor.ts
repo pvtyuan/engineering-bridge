@@ -22,6 +22,7 @@ export interface ExecutorRequest {
   readonly sandbox?: SandboxMode;
   readonly threadId?: string | undefined;
   readonly onEvidence?: (evidence: readonly ExecutorEvidence[]) => void;
+  readonly onOutput?: (output: string) => void;
 }
 
 export type ExecutorResult =

@@ -1,5 +1,11 @@
 # Release Notes
 
+## Unreleased — Awaitable task_result and Live Progress
+
+- `task_result` accepts bounded `wait_for: "ready"` waits with timeout snapshots while preserving legacy immediate calls.
+- `include_evidence: false` omits only evidence from the response.
+- Interactive tasks expose the latest bounded Codex agent message as `live_output`; continuing a task clears the prior round's snapshot.
+
 ## Unreleased — Supervised Completion Receipt
 
 - Trusted development instructions require a protocol-v1 Completion Receipt after the human-readable final summary.

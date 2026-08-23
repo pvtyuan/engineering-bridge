@@ -190,6 +190,8 @@ input.on("line", (line) => {
     const view = await waitForTerminal(client, run.body.task_id);
     assert.equal(view.state, "waiting_for_supervisor_review");
     assert.equal(view.review_output, reviewOutput);
+    assert.equal(view.live_output, reviewOutput);
+    assert.deepEqual(view.evidence, []);
     assert.deepEqual(view.completion_receipt, {
       status: "valid",
       receipt: {
@@ -202,6 +204,92 @@ input.on("line", (line) => {
         blockers: []
       }
     });
+
+    const readyWithoutEvidence = await call(client, "task_result", {
+      task_id: run.body.task_id,
+      wait_for: "ready",
+      timeout_ms: 1,
+      include_evidence: false
+    });
+    assert.equal(readyWithoutEvidence.isError, false);
+    assert.equal(readyWithoutEvidence.body.ready, true);
+    assert.equal("evidence" in readyWithoutEvidence.body, false);
+    assert.equal(readyWithoutEvidence.body.live_output, reviewOutput);
+  } finally {
+    await client.close();
+  }
+});
+
+test("task_result validates bounded ready waits and wait_for values", async () => {
+  const configPath = join(mkdtempSync(join(tmpdir(), "engineering-bridge-task-result-schema-")), "workspaces.json");
+  writeFileSync(configPath, "[]\n");
+  const { client, transport } = clientFor(configPath);
+
+  try {
+    await client.connect(transport);
+    const invalidTimeout = await call(client, "task_result", { task_id: "unknown", timeout_ms: 20_001 });
+    assert.equal(invalidTimeout.isError, true);
+    const invalidWaitFor = await call(client, "task_result", { task_id: "unknown", wait_for: "running" });
+    assert.equal(invalidWaitFor.isError, true);
+  } finally {
+    await client.close();
+  }
+});
+
+test("task_result returns a non-ready timeout snapshot without evidence", async () => {
+  const root = mkdtempSync(join(tmpdir(), "engineering-bridge-task-result-timeout-root-"));
+  const configDir = mkdtempSync(join(tmpdir(), "engineering-bridge-task-result-timeout-config-"));
+  const fakeBin = mkdtempSync(join(tmpdir(), "engineering-bridge-task-result-timeout-bin-"));
+  const configPath = join(configDir, "workspaces.json");
+  const fakeCodex = join(fakeBin, "codex");
+  writeFileSync(fakeCodex, `#!/usr/bin/env node
+import { createInterface } from "node:readline";
+
+const input = createInterface({ input: process.stdin });
+input.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.id === undefined) return;
+  let result = {};
+  if (message.method === "thread/start") result = { thread: { id: "thread-timeout" } };
+  if (message.method === "turn/start") result = { turn: { id: "turn-timeout" } };
+  process.stdout.write(JSON.stringify({ id: message.id, result }) + "\\n");
+});
+`);
+  chmodSync(fakeCodex, 0o755);
+  writeFileSync(configPath, `${JSON.stringify([{ id: "known", root }], null, 2)}\n`);
+  const { client, transport } = clientFor(configPath, {
+    PATH: `${fakeBin}:${process.env.PATH ?? ""}`
+  });
+
+  try {
+    await client.connect(transport);
+    const run = await call(client, "run_readonly_task", { workspace_id: "known", instruction: "hold" });
+    assert.equal(run.isError, false);
+    assert.equal(typeof run.body.task_id, "string");
+    if (typeof run.body.task_id !== "string") return;
+
+    let running: { isError: boolean; body: Record<string, unknown> } | undefined;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const result = await call(client, "task_result", { task_id: run.body.task_id });
+      if (result.body.state === "running") {
+        running = result;
+        break;
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal(running?.body.state, "running");
+
+    const timedOut = await call(client, "task_result", {
+      task_id: run.body.task_id,
+      wait_for: "ready",
+      timeout_ms: 5,
+      include_evidence: false
+    });
+    assert.equal(timedOut.isError, false);
+    assert.equal(timedOut.body.state, "running");
+    assert.equal(timedOut.body.ready, false);
+    assert.equal(timedOut.body.wait_timeout, true);
+    assert.equal("evidence" in timedOut.body, false);
   } finally {
     await client.close();
   }

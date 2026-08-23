@@ -118,6 +118,117 @@ test("taskView polls a legacy runTask through completed output", async () => {
   });
 });
 
+test("waitForReady resolves concurrent waiters on a ready transition and cleans them up", async () => {
+  const pending = deferred<ExecutorResult>();
+  const executor: Executor = { execute: () => pending.promise };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect" });
+
+  const first = service.waitForReady(taskId, 1_000);
+  const second = service.waitForReady(taskId, 1_000);
+  pending.resolve({ kind: "completed", output: "review" });
+
+  const views = await Promise.all([first, second]);
+  assert.equal(views[0]?.state, "waiting_for_supervisor_review");
+  assert.equal(views[0]?.ready, true);
+  assert.deepEqual(views[1], views[0]);
+  assert.equal((service as unknown as { readyWaiters: Map<unknown, unknown> }).readyWaiters.size, 0);
+});
+
+test("waitForReady treats failed and completed tasks as ready", async () => {
+  const failedService = new RegisteredWorkspaceTaskService(registry(), () => ({
+    execute: async () => ({
+      kind: "failed",
+      error: { code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed." }
+    })
+  }));
+  const failedTask = failedService.startTask({ workspace_id: "known", instruction: "fail" });
+  const failedView = await failedService.waitForReady(failedTask.taskId, 1_000);
+  assert.equal(failedView?.state, "failed");
+  assert.equal(failedView?.ready, true);
+
+  const completedService = new RegisteredWorkspaceTaskService(registry(), () => ({
+    execute: async () => ({ kind: "completed", output: "done" })
+  }));
+  const completedTask = completedService.runTask({ workspace_id: "known", instruction: "complete" });
+  const completedView = await completedService.waitForReady(completedTask.taskId, 1_000);
+  assert.equal(completedView?.state, "completed");
+  assert.equal(completedView?.ready, true);
+});
+
+test("waitForReady timeout returns the current non-ready snapshot without changing task state", async () => {
+  const pending = deferred<ExecutorResult>();
+  const service = new RegisteredWorkspaceTaskService(registry(), () => ({ execute: () => pending.promise }));
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "hold" });
+
+  while (service.taskView(taskId)?.state !== "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  const view = await service.waitForReady(taskId, 5);
+
+  assert.deepEqual(view && { state: view.state, ready: view.ready }, { state: "running", ready: false });
+  assert.equal(service.taskView(taskId)?.state, "running");
+  assert.equal((service as unknown as { readyWaiters: Map<unknown, unknown> }).readyWaiters.size, 0);
+  pending.resolve({ kind: "completed", output: "done" });
+  await waitForInteractiveReady(service, taskId);
+});
+
+test("waitForReady does not lose a readiness transition around waiter registration", async () => {
+  const service = new RegisteredWorkspaceTaskService(registry(), () => ({
+    execute: async () => ({ kind: "completed", output: "review" })
+  }));
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect" });
+
+  const view = await service.waitForReady(taskId, 1_000);
+  assert.equal(view?.state, "waiting_for_supervisor_review");
+  assert.equal(view?.ready, true);
+});
+
+test("interactive tasks expose a bounded latest live output and clear it on continue", async () => {
+  const first = deferred<ExecutorResult>();
+  const second = deferred<ExecutorResult>();
+  const requests: ExecutorRequest[] = [];
+  let round = 0;
+  const executor: Executor = {
+    execute: async (request) => {
+      requests.push(request);
+      return (round++ === 0 ? first.promise : second.promise);
+    }
+  };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "first" });
+
+  while (service.taskView(taskId)?.state !== "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  const firstRequest = requests[0];
+  assert.ok(firstRequest);
+  firstRequest.onOutput?.("");
+  assert.equal("live_output" in service.taskView(taskId)!, false);
+  firstRequest.onOutput?.("first progress");
+  assert.equal(service.taskView(taskId)?.live_output, "first progress");
+  const longOutput = "x".repeat(20_000);
+  firstRequest.onOutput?.(longOutput);
+  assert.equal(service.taskView(taskId)?.live_output, `${"x".repeat(16_372)}\n[truncated]`);
+
+  first.resolve({ kind: "completed", output: "authoritative review output" });
+  await waitForInteractiveReady(service, taskId);
+  assert.equal(service.taskView(taskId)?.review_output, "authoritative review output");
+
+  const queued = await service.controlTask(taskId, "continue", "second round");
+  assert.equal(queued.state, "queued");
+  assert.equal("live_output" in queued, false);
+
+  while (service.taskView(taskId)?.state !== "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  requests[1]?.onOutput?.("next-round progress");
+  assert.equal(service.taskView(taskId)?.live_output, "next-round progress");
+  second.resolve({ kind: "completed", output: "second review output" });
+  await waitForInteractiveReady(service, taskId);
+  assert.equal(service.taskView(taskId)?.review_output, "second review output");
+});
+
 test("records completed output and preserves the instruction", async () => {
   const calls: ExecutorRequest[] = [];
   const executor: Executor = {

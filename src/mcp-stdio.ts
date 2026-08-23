@@ -11,7 +11,7 @@ import { CodexExecutor } from "./executors/codex-executor.js";
 import { DshExecutor } from "./executors/dsh-executor.js";
 import { VERSION } from "./version.js";
 import { CoreError, serializeError } from "./core/errors.js";
-import { RegisteredWorkspaceTaskService } from "./tasks/registered-workspace-task-service.js";
+import { MAX_TASK_RESULT_WAIT_MS, RegisteredWorkspaceTaskService } from "./tasks/registered-workspace-task-service.js";
 import { isSafeTaskId, isSafeWorkBranch } from "./tasks/development-task-instruction.js";
 import { ControlledPatchService } from "./tasks/controlled-patch-service.js";
 import { ManagedWorkspaceCatalog } from "./workspaces/managed-workspace-catalog.js";
@@ -133,10 +133,21 @@ async function main(): Promise<void> {
 
   server.registerTool("task_result", {
     description: "Retrieve supervised task state, completed/review output, evidence, safe errors, and development identity when applicable. This tool is read-only.",
-    inputSchema: { task_id: z.string() }
-  }, ({ task_id }) => {
-    const view = service.taskView(task_id);
+    inputSchema: {
+      task_id: z.string(),
+      wait_for: z.literal("ready").optional(),
+      timeout_ms: z.number().int().min(0).max(MAX_TASK_RESULT_WAIT_MS).optional(),
+      include_evidence: z.boolean().optional().default(true)
+    }
+  }, async ({ task_id, wait_for, timeout_ms, include_evidence }) => {
+    let view = service.taskView(task_id);
     if (view === undefined) return unknownTask();
+    let waitTimeout = false;
+    if (wait_for === "ready" && view.ready !== true) {
+      view = await service.waitForReady(task_id, timeout_ms ?? MAX_TASK_RESULT_WAIT_MS);
+      if (view === undefined) return unknownTask();
+      waitTimeout = view.ready !== true;
+    }
     return jsonContent({
       task_id: view.taskId,
       state: view.state,
@@ -147,11 +158,13 @@ async function main(): Promise<void> {
       ...(view.taskContract === undefined ? {} : { task_contract: view.taskContract }),
       ...(view.threadId === undefined ? {} : { thread_id: view.threadId }),
       ready: view.ready,
+      ...(waitTimeout ? { wait_timeout: true } : {}),
       ...(view.output === undefined ? {} : { output: view.output }),
       ...(view.review_output === undefined ? {} : { review_output: view.review_output }),
       ...(view.completion_receipt === undefined ? {} : { completion_receipt: view.completion_receipt }),
       ...(view.partial_output === undefined ? {} : { partial_output: view.partial_output }),
-      evidence: view.evidence,
+      ...(view.live_output === undefined ? {} : { live_output: view.live_output }),
+      ...(include_evidence ? { evidence: view.evidence } : {}),
       ...(view.error === undefined ? {} : { error: view.error })
     });
   });

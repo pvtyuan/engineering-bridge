@@ -112,6 +112,12 @@ apply_controlled_patch
 
 `run_task` is intentionally removed rather than retained as an alias, because the tool name itself is routing metadata for the supervisor.
 
+## Supervisor result metadata
+
+`task_result` remains immediate when called with only `task_id`. Pass `wait_for: "ready"` to await a reviewable state, with an optional `timeout_ms` capped at 20 seconds (20 seconds by default). A timeout returns `ready: false` and `wait_timeout: true` without changing or interrupting the task. `include_evidence` defaults to `true`; setting it to `false` omits only `evidence`.
+
+Interactive tasks can expose `live_output`, the latest bounded non-empty Codex `agentMessage` snapshot. It is not a transcript or token stream, and `continue` clears it before the next execution round. `review_output` remains the authoritative completed-turn output.
+
 ## Build and test
 
 Requires Node.js 22+.
